@@ -19,10 +19,25 @@ export type RGBColor = {
   b: number;
 };
 
+export type CropArea = {
+  leftPercent: number;
+  topPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+};
+
+export type CropBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type ExtractionOptions = {
   framesPerSecond: number;
   segmentStart: number;
   segmentEnd: number;
+  cropArea?: CropArea | null;
 };
 
 export type SheetOptions = {

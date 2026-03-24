@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type {
+  CropArea,
   ColorKeyOptions,
   ColorSample,
   ExtractedFrame,
@@ -24,10 +25,13 @@ import {
 import { getSheetAppearance, renderFrameSheet } from './lib/sheet';
 import { formatTimestamp } from './lib/time';
 import {
+  cropCanvas,
   createVideoFrameReader,
   extractFrames,
+  getCropBounds,
   getSampleTimes,
   loadVideoAsset,
+  normalizeCropArea,
   revokeVideoAsset,
   type VideoFrameReader,
 } from './lib/video';
@@ -42,6 +46,10 @@ const DEFAULT_DESPILL = 50;
 const DEFAULT_EDGE_RADIUS = 22;
 const DEFAULT_SAMPLE_RADIUS = 6;
 const DEFAULT_SOLID_PREVIEW_BG = '#111827';
+const DEFAULT_CROP_LEFT_PERCENT = 0;
+const DEFAULT_CROP_TOP_PERCENT = 0;
+const DEFAULT_CROP_WIDTH_PERCENT = 100;
+const DEFAULT_CROP_HEIGHT_PERCENT = 100;
 const MAX_EXTRACTED_FRAMES = 180;
 const BRAND_ASSET_PATH = `${import.meta.env.BASE_URL}logo.jpg`;
 const SUPPORT_LINKS = [
@@ -80,6 +88,14 @@ type SheetPreviewResult = {
 type ResultPreviewMode = 'sheet' | 'animation';
 
 type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
+
+function clampPercent(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(value, min), max);
+}
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => {
@@ -209,9 +225,14 @@ function App() {
   const [smoothing, setSmoothing] = useState(true);
   const [despillEnabled, setDespillEnabled] = useState(true);
   const [referenceTime, setReferenceTime] = useState(0);
+  const [referenceRawFrame, setReferenceRawFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceFrame, setReferenceFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceResultFrame, setReferenceResultFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceMaskFrame, setReferenceMaskFrame] = useState<HTMLCanvasElement | null>(null);
+  const [cropLeftPercent, setCropLeftPercent] = useState(DEFAULT_CROP_LEFT_PERCENT);
+  const [cropTopPercent, setCropTopPercent] = useState(DEFAULT_CROP_TOP_PERCENT);
+  const [cropWidthPercent, setCropWidthPercent] = useState(DEFAULT_CROP_WIDTH_PERCENT);
+  const [cropHeightPercent, setCropHeightPercent] = useState(DEFAULT_CROP_HEIGHT_PERCENT);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
@@ -282,6 +303,42 @@ function App() {
       }) as CSSProperties,
     [segmentEnd, segmentStart, videoMeta],
   );
+  const cropArea = useMemo<CropArea>(
+    () =>
+      normalizeCropArea({
+        leftPercent: cropLeftPercent,
+        topPercent: cropTopPercent,
+        widthPercent: cropWidthPercent,
+        heightPercent: cropHeightPercent,
+      }),
+    [cropHeightPercent, cropLeftPercent, cropTopPercent, cropWidthPercent],
+  );
+  const cropBounds = useMemo(
+    () =>
+      videoMeta
+        ? getCropBounds(videoMeta.width, videoMeta.height, cropArea)
+        : null,
+    [cropArea, videoMeta],
+  );
+  const isCropApplied = Boolean(
+    cropBounds &&
+      videoMeta &&
+      (cropBounds.x > 0 ||
+        cropBounds.y > 0 ||
+        cropBounds.width < videoMeta.width ||
+        cropBounds.height < videoMeta.height),
+  );
+  const outputVideoMeta = useMemo<VideoMeta | null>(() => {
+    if (!videoMeta || !cropBounds) {
+      return videoMeta;
+    }
+
+    return {
+      ...videoMeta,
+      width: cropBounds.width,
+      height: cropBounds.height,
+    };
+  }, [cropBounds, videoMeta]);
 
   const colorKeyOptions = useMemo<ColorKeyOptions | null>(() => {
     if (!colorSample) {
@@ -390,6 +447,7 @@ function App() {
   useEffect(() => {
     if (!videoUrl || !videoMeta) {
       disposeReferenceReader();
+      setReferenceRawFrame(null);
       setReferenceFrame(null);
       return;
     }
@@ -447,7 +505,7 @@ function App() {
           return;
         }
 
-        setReferenceFrame(canvas);
+        setReferenceRawFrame(canvas);
       })
       .catch((nextError) => {
         if (cancelled) {
@@ -468,6 +526,31 @@ function App() {
   }, [readerReady, referenceTime, videoMeta]);
 
   useEffect(() => {
+    if (!referenceRawFrame) {
+      setReferenceFrame(null);
+      return;
+    }
+
+    try {
+      const cropped = cropCanvas(referenceRawFrame, cropArea);
+      setReferenceFrame(cropped);
+      setSamplePoint((current) => {
+        if (!current) {
+          return current;
+        }
+
+        if (current.x >= cropped.width || current.y >= cropped.height) {
+          return null;
+        }
+
+        return current;
+      });
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '参考帧裁剪失败。');
+    }
+  }, [cropArea, referenceRawFrame]);
+
+  useEffect(() => {
     if (!videoMeta) {
       return;
     }
@@ -477,6 +560,20 @@ function App() {
       setReferenceTime(Number(clampedTime.toFixed(3)));
     }
   }, [referenceTime, segmentEnd, segmentStart, videoMeta]);
+
+  useEffect(() => {
+    if (!samplePoint && !colorSample) {
+      return;
+    }
+
+    setSamplePoint(null);
+    setColorSample(null);
+  }, [
+    cropArea.heightPercent,
+    cropArea.leftPercent,
+    cropArea.topPercent,
+    cropArea.widthPercent,
+  ]);
 
   useEffect(() => {
     if (!referenceFrame || !samplePoint) {
@@ -581,6 +678,10 @@ function App() {
     clearGeneratedAssets('参数已更新，请重新生成最新结果。');
   }, [
     colorSample?.hex,
+    cropArea.heightPercent,
+    cropArea.leftPercent,
+    cropArea.topPercent,
+    cropArea.widthPercent,
     despill,
     despillEnabled,
     edgeRadius,
@@ -601,9 +702,14 @@ function App() {
     setStatus('正在读取视频元数据...');
 
     disposeReferenceReader();
+    setReferenceRawFrame(null);
     setReferenceFrame(null);
     setReferenceResultFrame(null);
     setReferenceMaskFrame(null);
+    setCropLeftPercent(DEFAULT_CROP_LEFT_PERCENT);
+    setCropTopPercent(DEFAULT_CROP_TOP_PERCENT);
+    setCropWidthPercent(DEFAULT_CROP_WIDTH_PERCENT);
+    setCropHeightPercent(DEFAULT_CROP_HEIGHT_PERCENT);
     setSamplePoint(null);
     setColorSample(null);
     setIsChromaStageOpen(false);
@@ -661,6 +767,7 @@ function App() {
           framesPerSecond,
           segmentStart,
           segmentEnd,
+          cropArea,
         },
         (current, total) => {
           setStatus(`正在抽取序列帧 ${current}/${total}...`);
@@ -711,7 +818,7 @@ function App() {
   }
 
   async function renderSheetPreview(assets?: GeneratedAssets): Promise<SheetPreviewResult> {
-    if (!videoMeta) {
+    if (!outputVideoMeta) {
       throw new Error('请先上传视频。');
     }
 
@@ -724,7 +831,7 @@ function App() {
     setStatus(transparent ? '正在拼接透明序列表...' : '正在拼接序列图...');
     const renderResult = await renderFrameSheet(
       framesForRender,
-      videoMeta,
+      outputVideoMeta,
       sheetOptions,
       false,
       getSheetAppearance(transparent),
@@ -792,6 +899,33 @@ function App() {
     } finally {
       setIsRendering(false);
     }
+  }
+
+  function resetCropArea(): void {
+    setCropLeftPercent(DEFAULT_CROP_LEFT_PERCENT);
+    setCropTopPercent(DEFAULT_CROP_TOP_PERCENT);
+    setCropWidthPercent(DEFAULT_CROP_WIDTH_PERCENT);
+    setCropHeightPercent(DEFAULT_CROP_HEIGHT_PERCENT);
+  }
+
+  function handleCropLeftChange(value: number): void {
+    const nextLeft = clampPercent(value, 0, 99);
+    setCropLeftPercent(nextLeft);
+    setCropWidthPercent((current) => clampPercent(current, 1, 100 - nextLeft));
+  }
+
+  function handleCropTopChange(value: number): void {
+    const nextTop = clampPercent(value, 0, 99);
+    setCropTopPercent(nextTop);
+    setCropHeightPercent((current) => clampPercent(current, 1, 100 - nextTop));
+  }
+
+  function handleCropWidthChange(value: number): void {
+    setCropWidthPercent(clampPercent(value, 1, 100 - cropLeftPercent));
+  }
+
+  function handleCropHeightChange(value: number): void {
+    setCropHeightPercent(clampPercent(value, 1, 100 - cropTopPercent));
   }
 
   function handleReferenceCanvasClick(event: React.MouseEvent<HTMLCanvasElement>): void {
@@ -987,6 +1121,78 @@ function App() {
                     <span>片段长度</span>
                     <strong>{selectedDuration.toFixed(2)} 秒</strong>
                   </div>
+                </div>
+              </div>
+
+              <div className="crop-picker">
+                <div className="segment-picker__head">
+                  <span>画面裁剪</span>
+                  <strong>
+                    {cropBounds
+                      ? `${cropBounds.width} × ${cropBounds.height}`
+                      : `${videoMeta.width} × ${videoMeta.height}`}
+                  </strong>
+                </div>
+
+                <div className="crop-grid">
+                  <label className="field">
+                    <span>左侧偏移 (%)</span>
+                    <input
+                      min={0}
+                      max={99}
+                      type="number"
+                      value={cropLeftPercent}
+                      onChange={(event) => handleCropLeftChange(Number(event.target.value) || 0)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>顶部偏移 (%)</span>
+                    <input
+                      min={0}
+                      max={99}
+                      type="number"
+                      value={cropTopPercent}
+                      onChange={(event) => handleCropTopChange(Number(event.target.value) || 0)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>裁剪宽度 (%)</span>
+                    <input
+                      min={1}
+                      max={100 - cropLeftPercent}
+                      type="number"
+                      value={cropWidthPercent}
+                      onChange={(event) => handleCropWidthChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>裁剪高度 (%)</span>
+                    <input
+                      min={1}
+                      max={100 - cropTopPercent}
+                      type="number"
+                      value={cropHeightPercent}
+                      onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+                </div>
+
+                <div className="crop-picker__footer">
+                  <small>
+                    当前输出尺寸：{cropBounds?.width ?? videoMeta.width} ×{' '}
+                    {cropBounds?.height ?? videoMeta.height}
+                  </small>
+                  <button
+                    className="ghost-button"
+                    disabled={!isCropApplied}
+                    type="button"
+                    onClick={resetCropArea}
+                  >
+                    重置裁剪
+                  </button>
                 </div>
               </div>
 

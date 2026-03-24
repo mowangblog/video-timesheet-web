@@ -517,6 +517,36 @@ button {
   border: 1px solid rgba(113, 92, 255, 0.1);
 }
 
+.crop-picker {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 18px;
+  background: #f7f8fd;
+  border: 1px solid rgba(113, 92, 255, 0.1);
+}
+
+.crop-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.crop-picker__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crop-picker__footer small {
+  color: #6a7783;
+}
+
+.crop-picker .ghost-button {
+  min-width: 112px;
+}
+
 .segment-picker__head {
   display: flex;
   align-items: center;
@@ -1238,7 +1268,8 @@ button {
   .mode-switch,
   .control-grid,
   .stats-grid,
-  .export-config-grid {
+  .export-config-grid,
+  .crop-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1291,6 +1322,11 @@ button {
 
   .sample-badge-row {
     align-items: stretch;
+  }
+
+  .crop-picker__footer {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .sample-badge {

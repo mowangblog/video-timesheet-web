@@ -1,4 +1,10 @@
-import type { ExtractedFrame, ExtractionOptions, VideoMeta } from '../types';
+import type {
+  CropArea,
+  CropBounds,
+  ExtractedFrame,
+  ExtractionOptions,
+  VideoMeta,
+} from '../types';
 import { formatTimestamp } from './time';
 
 type VideoAsset = {
@@ -10,6 +16,9 @@ export type VideoFrameReader = {
   captureFrameAt: (time: number) => Promise<HTMLCanvasElement>;
   dispose: () => void;
 };
+
+const MIN_CROP_PERCENT = 1;
+const MAX_CROP_PERCENT = 100;
 
 function waitForEvent<T extends keyof HTMLMediaElementEventMap>(
   target: HTMLVideoElement,
@@ -135,6 +144,100 @@ function clampTime(time: number, duration: number): number {
   return Math.max(0, Math.min(time, duration));
 }
 
+function clampValue(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(value, min), max);
+}
+
+export function normalizeCropArea(cropArea?: CropArea | null): CropArea {
+  if (!cropArea) {
+    return {
+      leftPercent: 0,
+      topPercent: 0,
+      widthPercent: 100,
+      heightPercent: 100,
+    };
+  }
+
+  const leftPercent = clampValue(cropArea.leftPercent, 0, MAX_CROP_PERCENT - MIN_CROP_PERCENT);
+  const topPercent = clampValue(cropArea.topPercent, 0, MAX_CROP_PERCENT - MIN_CROP_PERCENT);
+  const widthLimit = MAX_CROP_PERCENT - leftPercent;
+  const heightLimit = MAX_CROP_PERCENT - topPercent;
+
+  return {
+    leftPercent,
+    topPercent,
+    widthPercent: clampValue(cropArea.widthPercent, MIN_CROP_PERCENT, widthLimit),
+    heightPercent: clampValue(cropArea.heightPercent, MIN_CROP_PERCENT, heightLimit),
+  };
+}
+
+export function getCropBounds(
+  sourceWidth: number,
+  sourceHeight: number,
+  cropArea?: CropArea | null,
+): CropBounds {
+  const width = Math.max(1, Math.round(sourceWidth));
+  const height = Math.max(1, Math.round(sourceHeight));
+  const normalized = normalizeCropArea(cropArea);
+
+  const x = Math.floor((normalized.leftPercent / 100) * width);
+  const y = Math.floor((normalized.topPercent / 100) * height);
+  const maxCropWidth = Math.max(1, width - x);
+  const maxCropHeight = Math.max(1, height - y);
+  const rawCropWidth = Math.round((normalized.widthPercent / 100) * width);
+  const rawCropHeight = Math.round((normalized.heightPercent / 100) * height);
+
+  return {
+    x,
+    y,
+    width: clampValue(rawCropWidth, 1, maxCropWidth),
+    height: clampValue(rawCropHeight, 1, maxCropHeight),
+  };
+}
+
+export function cropCanvas(
+  source: HTMLCanvasElement,
+  cropArea?: CropArea | null,
+): HTMLCanvasElement {
+  const bounds = getCropBounds(source.width, source.height, cropArea);
+  const isFullFrame =
+    bounds.x === 0 &&
+    bounds.y === 0 &&
+    bounds.width === source.width &&
+    bounds.height === source.height;
+
+  if (isFullFrame) {
+    return source;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = bounds.width;
+  canvas.height = bounds.height;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('当前浏览器无法创建 Canvas 绘图上下文。');
+  }
+
+  context.drawImage(
+    source,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    0,
+    0,
+    bounds.width,
+    bounds.height,
+  );
+
+  return canvas;
+}
+
 export function getSampleTimes(
   duration: number,
   framesPerSecond: number,
@@ -200,8 +303,9 @@ export async function extractFrames(
 
     for (const [index, time] of sampleTimes.entries()) {
       const image = await reader.captureFrameAt(time);
+      const croppedImage = cropCanvas(image, options.cropArea);
       frames.push({
-        image,
+        image: croppedImage,
         time,
         label: formatTimestamp(time),
       });
