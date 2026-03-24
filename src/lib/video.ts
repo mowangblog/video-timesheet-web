@@ -127,26 +127,50 @@ export async function createVideoFrameReader(videoUrl: string): Promise<VideoFra
   };
 }
 
-export function getSampleTimes(duration: number, frameCount: number): number[] {
-  if (!Number.isFinite(duration) || duration <= 0 || frameCount <= 0) {
+function clampTime(time: number, duration: number): number {
+  if (!Number.isFinite(time)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(time, duration));
+}
+
+export function getSampleTimes(
+  duration: number,
+  framesPerSecond: number,
+  segmentStart = 0,
+  segmentEnd = duration,
+): number[] {
+  if (!Number.isFinite(duration) || duration <= 0 || framesPerSecond <= 0) {
     return [];
   }
 
-  if (frameCount === 1) {
-    return [duration / 2];
+  const rawStart = clampTime(Math.min(segmentStart, segmentEnd), duration);
+  const rawEnd = clampTime(Math.max(segmentStart, segmentEnd), duration);
+  const segmentDuration = rawEnd - rawStart;
+
+  if (segmentDuration <= 0.001) {
+    return [Number(rawStart.toFixed(3))];
   }
 
-  const margin = Math.min(0.2, duration * 0.05);
-  const start = Math.min(margin, duration / 2);
-  const end = Math.max(start, duration - margin);
+  const margin = Math.min(0.2, segmentDuration * 0.05);
+  const safeStart = rawStart + margin;
+  const safeEnd = rawEnd - margin;
+  const safeDuration = safeEnd - safeStart;
 
-  if (end <= start) {
-    return Array.from({ length: frameCount }, () => duration / 2);
+  if (safeDuration <= 0) {
+    return [Number(((rawStart + rawEnd) / 2).toFixed(3))];
   }
 
-  const step = (end - start) / (frameCount - 1);
+  const frameCount = Math.floor(safeDuration * framesPerSecond) + 1;
+
+  if (frameCount <= 1) {
+    return [Number(((safeStart + safeEnd) / 2).toFixed(3))];
+  }
+
+  const step = safeDuration / (frameCount - 1);
   return Array.from({ length: frameCount }, (_, index) => {
-    const next = start + step * index;
+    const next = safeStart + step * index;
     return Number(Math.min(duration, Math.max(0, next)).toFixed(3));
   });
 }
@@ -166,7 +190,12 @@ export async function extractFrames(
   const reader = await createVideoFrameReader(videoUrl);
 
   try {
-    const sampleTimes = getSampleTimes(meta.duration, options.frameCount);
+    const sampleTimes = getSampleTimes(
+      meta.duration,
+      options.framesPerSecond,
+      options.segmentStart,
+      options.segmentEnd,
+    );
     const frames: ExtractedFrame[] = [];
 
     for (const [index, time] of sampleTimes.entries()) {
@@ -174,7 +203,7 @@ export async function extractFrames(
       frames.push({
         image,
         time,
-        label: options.includeTimestamps ? formatTimestamp(time) : '',
+        label: formatTimestamp(time),
       });
 
       onProgress?.(index + 1, sampleTimes.length, time);

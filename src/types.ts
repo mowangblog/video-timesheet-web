@@ -20,8 +20,9 @@ export type RGBColor = {
 };
 
 export type ExtractionOptions = {
-  frameCount: number;
-  includeTimestamps: boolean;
+  framesPerSecond: number;
+  segmentStart: number;
+  segmentEnd: number;
 };
 
 export type SheetOptions = {

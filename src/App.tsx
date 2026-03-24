@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type {
   ColorKeyOptions,
   ColorSample,
-  ExportMode,
   ExtractedFrame,
   KeyAlgorithm,
   PreviewMode,
@@ -27,15 +26,15 @@ import { formatTimestamp } from './lib/time';
 import {
   createVideoFrameReader,
   extractFrames,
+  getSampleTimes,
   loadVideoAsset,
   revokeVideoAsset,
   type VideoFrameReader,
 } from './lib/video';
 
-const DEFAULT_FRAME_COUNT = 12;
+const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
 const DEFAULT_GAP = 8;
-const DEFAULT_BG = '#ffffff';
 const DEFAULT_KEY_ALGORITHM: KeyAlgorithm = 'enhanced';
 const DEFAULT_TOLERANCE = 28;
 const DEFAULT_SOFTNESS = 14;
@@ -43,6 +42,7 @@ const DEFAULT_DESPILL = 50;
 const DEFAULT_EDGE_RADIUS = 22;
 const DEFAULT_SAMPLE_RADIUS = 6;
 const DEFAULT_SOLID_PREVIEW_BG = '#111827';
+const MAX_EXTRACTED_FRAMES = 180;
 
 type SamplePoint = {
   x: number;
@@ -52,6 +52,11 @@ type SamplePoint = {
 type GeneratedAssets = {
   frames: ExtractedFrame[];
   processed: ProcessedFrame[] | null;
+};
+
+type SheetPreviewResult = {
+  renderResult: RenderResult;
+  transparent: boolean;
 };
 
 function nextFrame(): Promise<void> {
@@ -123,12 +128,12 @@ function toTransparentSheetFrames(processedFrames: ProcessedFrame[]): ExtractedF
 function App() {
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [frameCount, setFrameCount] = useState(DEFAULT_FRAME_COUNT);
+  const [isChromaStageOpen, setIsChromaStageOpen] = useState(false);
+  const [framesPerSecond, setFramesPerSecond] = useState(DEFAULT_FRAMES_PER_SECOND);
+  const [segmentStart, setSegmentStart] = useState(0);
+  const [segmentEnd, setSegmentEnd] = useState(0);
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [gap, setGap] = useState(DEFAULT_GAP);
-  const [backgroundColor, setBackgroundColor] = useState(DEFAULT_BG);
-  const [includeTimestamps, setIncludeTimestamps] = useState(false);
-  const [algorithm, setAlgorithm] = useState<KeyAlgorithm>(DEFAULT_KEY_ALGORITHM);
   const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE);
   const [softness, setSoftness] = useState(DEFAULT_SOFTNESS);
   const [despill, setDespill] = useState(DEFAULT_DESPILL);
@@ -144,10 +149,8 @@ function App() {
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
   const [solidPreviewColor, setSolidPreviewColor] = useState(DEFAULT_SOLID_PREVIEW_BG);
-  const [previewExportMode, setPreviewExportMode] = useState<Exclude<ExportMode, 'transparent-frames-zip'>>(
-    'transparent-sheet',
-  );
   const [result, setResult] = useState<RenderResult | null>(null);
+  const [resultTransparent, setResultTransparent] = useState(false);
   const [status, setStatus] = useState('请选择一个本地视频开始生成。');
   const [isDragging, setIsDragging] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
@@ -160,6 +163,10 @@ function App() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const controlsPanelRef = useRef<HTMLDivElement | null>(null);
+  const chromaPanelRef = useRef<HTMLElement | null>(null);
+  const chromaActionsRef = useRef<HTMLDivElement | null>(null);
+  const resultPanelRef = useRef<HTMLElement | null>(null);
   const readerRef = useRef<VideoFrameReader | null>(null);
   const readerTokenRef = useRef(0);
   const hasInitializedInvalidationRef = useRef(false);
@@ -169,26 +176,41 @@ function App() {
   const sheetOptions: SheetOptions = {
     columns,
     gap,
-    backgroundColor,
+    backgroundColor: '#ffffff',
   };
 
   const baseFileName = useMemo(
     () => getBaseFileName(videoMeta?.name ?? 'video'),
     [videoMeta?.name],
   );
-
-  const stats = useMemo(() => {
+  const sampleTimes = useMemo(() => {
     if (!videoMeta) {
       return [];
     }
 
-    return [
-      ['文件名', videoMeta.name],
-      ['时长', `${videoMeta.duration.toFixed(2)} 秒`],
-      ['分辨率', `${videoMeta.width} × ${videoMeta.height}`],
-      ['参考帧', formatTimestamp(referenceTime)],
-    ];
-  }, [referenceTime, videoMeta]);
+    return getSampleTimes(
+      videoMeta.duration,
+      framesPerSecond,
+      segmentStart,
+      segmentEnd,
+    );
+  }, [framesPerSecond, segmentEnd, segmentStart, videoMeta]);
+  const firstSampleTime = sampleTimes[0] ?? 0;
+  const selectedDuration = Math.max(0, segmentEnd - segmentStart);
+  const estimatedFrameCount = sampleTimes.length;
+  const frameLimitExceeded = estimatedFrameCount > MAX_EXTRACTED_FRAMES;
+  const segmentTrackStyle = useMemo(
+    () =>
+      ({
+        ['--segment-start' as const]: videoMeta
+          ? `${(segmentStart / videoMeta.duration) * 100}%`
+          : '0%',
+        ['--segment-end' as const]: videoMeta
+          ? `${(segmentEnd / videoMeta.duration) * 100}%`
+          : '100%',
+      }) as CSSProperties,
+    [segmentEnd, segmentStart, videoMeta],
+  );
 
   const colorKeyOptions = useMemo<ColorKeyOptions | null>(() => {
     if (!colorSample) {
@@ -204,10 +226,9 @@ function App() {
       edgeRadius,
       smoothing,
       despillEnabled,
-      algorithm,
+      algorithm: DEFAULT_KEY_ALGORITHM,
     };
   }, [
-    algorithm,
     colorSample,
     despill,
     despillEnabled,
@@ -221,13 +242,24 @@ function App() {
   const canGenerate = Boolean(
     videoMeta &&
       videoUrl &&
+      isChromaStageOpen &&
       !isRendering &&
-      colorKeyOptions,
+      estimatedFrameCount > 0 &&
+      !frameLimitExceeded,
   );
-  const hasGeneratedAssets = Boolean(extractedFrames?.length);
-  const canExportTransparent = Boolean(processedFrames?.length);
+  const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
+  const showResultStage = Boolean(result);
 
-  function replacePreviewResult(next: RenderResult | null): void {
+  function scrollToStep(target: { current: HTMLElement | null }): void {
+    window.setTimeout(() => {
+      target.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }, 180);
+  }
+
+  function replacePreviewResult(next: RenderResult | null, transparent = false): void {
     setResult((current) => {
       if (current) {
         URL.revokeObjectURL(current.objectUrl);
@@ -235,6 +267,7 @@ function App() {
 
       return next;
     });
+    setResultTransparent(Boolean(next && transparent));
   }
 
   function disposeReferenceReader(): void {
@@ -354,6 +387,17 @@ function App() {
   }, [readerReady, referenceTime, videoMeta]);
 
   useEffect(() => {
+    if (!videoMeta) {
+      return;
+    }
+
+    const clampedTime = Math.min(Math.max(referenceTime, segmentStart), segmentEnd);
+    if (Math.abs(clampedTime - referenceTime) > 0.001) {
+      setReferenceTime(Number(clampedTime.toFixed(3)));
+    }
+  }, [referenceTime, segmentEnd, segmentStart, videoMeta]);
+
+  useEffect(() => {
     if (!referenceFrame || !samplePoint) {
       setColorSample(null);
       return;
@@ -418,23 +462,20 @@ function App() {
 
     clearGeneratedAssets('参数已更新，请重新生成最新结果。');
   }, [
-    algorithm,
-    backgroundColor,
     colorSample?.hex,
-    columns,
     despill,
     despillEnabled,
     edgeRadius,
-    gap,
-    includeTimestamps,
+    framesPerSecond,
     samplePoint?.x,
     samplePoint?.y,
     sampleRadius,
+    segmentEnd,
+    segmentStart,
     smoothing,
     softness,
     tolerance,
     videoUrl,
-    frameCount,
   ]);
 
   async function updateFile(file: File): Promise<void> {
@@ -447,6 +488,7 @@ function App() {
     setReferenceMaskFrame(null);
     setSamplePoint(null);
     setColorSample(null);
+    setIsChromaStageOpen(false);
     clearGeneratedAssets();
 
     if (videoUrl) {
@@ -458,8 +500,12 @@ function App() {
       const asset = await loadVideoAsset(file);
       setVideoMeta(asset.meta);
       setVideoUrl(asset.url);
-      setReferenceTime(Number((asset.meta.duration / 2).toFixed(3)));
-      setStatus('视频已就绪，先在参考帧上点一下背景颜色，再生成结果。');
+      setSegmentStart(0);
+      setSegmentEnd(Number(asset.meta.duration.toFixed(3)));
+      setReferenceTime(0);
+      setPreviewMode('result');
+      setStatus('视频已就绪，点击“提取帧”开始选择背景颜色。');
+      scrollToStep(controlsPanelRef);
     } catch (nextError) {
       setVideoMeta(null);
       setStatus('读取失败，请换一个文件后重试。');
@@ -481,26 +527,37 @@ function App() {
       throw new Error('请先上传一个视频文件。');
     }
 
-    if (!colorKeyOptions) {
-      throw new Error('请先在参考帧上点击背景颜色。');
+    if (frameLimitExceeded) {
+      throw new Error(`当前片段预计会提取 ${estimatedFrameCount} 帧，请缩短片段或降低每秒帧数。`);
     }
 
     setError(null);
     setIsRendering(true);
 
     try {
-      setStatus(`正在抽取序列帧 0/${frameCount}...`);
+      setStatus(`正在抽取序列帧 0/${estimatedFrameCount}...`);
       const frames = await extractFrames(
         videoUrl,
         videoMeta,
         {
-          frameCount,
-          includeTimestamps,
+          framesPerSecond,
+          segmentStart,
+          segmentEnd,
         },
         (current, total) => {
           setStatus(`正在抽取序列帧 ${current}/${total}...`);
         },
       );
+
+      if (!colorKeyOptions) {
+        setExtractedFrames(frames);
+        setProcessedFrames(null);
+
+        return {
+          frames,
+          processed: null,
+        };
+      }
 
       const nextProcessedFrames: ProcessedFrame[] = [];
 
@@ -535,58 +592,63 @@ function App() {
     return generateAssets();
   }
 
-  async function renderSheetPreview(
-    mode: Exclude<ExportMode, 'transparent-frames-zip'>,
-    assets?: GeneratedAssets,
-  ): Promise<RenderResult> {
+  async function renderSheetPreview(assets?: GeneratedAssets): Promise<SheetPreviewResult> {
     if (!videoMeta) {
       throw new Error('请先上传视频。');
     }
 
     const currentAssets = assets ?? (await ensureAssets());
-    const transparent = mode === 'transparent-sheet';
-    const framesForRender = transparent
-      ? currentAssets.processed
-        ? toTransparentSheetFrames(currentAssets.processed)
-        : null
+    const transparent = Boolean(currentAssets.processed);
+    const framesForRender = currentAssets.processed
+      ? toTransparentSheetFrames(currentAssets.processed)
       : currentAssets.frames;
 
-    if (!framesForRender) {
-      throw new Error('透明序列表需要先开启背景扣像并完成取色。');
-    }
-
-    setStatus(transparent ? '正在拼接透明序列表...' : '正在拼接普通序列表...');
-    const nextResult = await renderFrameSheet(
+    setStatus(transparent ? '正在拼接透明序列表...' : '正在拼接序列图...');
+    const renderResult = await renderFrameSheet(
       framesForRender,
       videoMeta,
       sheetOptions,
-      includeTimestamps,
+      false,
       getSheetAppearance(transparent),
     );
 
-    replacePreviewResult(nextResult);
-    setPreviewExportMode(mode);
-    setStatus('生成完成，可以继续预览或下载。');
+    replacePreviewResult(renderResult, transparent);
+    setStatus(transparent ? '透明序列图已生成，可以继续预览或下载。' : '普通序列图已生成，可以继续预览或下载。');
 
-    return nextResult;
+    return {
+      renderResult,
+      transparent,
+    };
   }
 
   async function handleGeneratePreview(): Promise<void> {
     try {
       const assets = await ensureAssets();
-      await renderSheetPreview('transparent-sheet', assets);
+      await renderSheetPreview(assets);
+      scrollToStep(resultPanelRef);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       setStatus('生成失败，请调整参数后重试。');
     }
   }
 
-  async function handleDownloadSheet(
-    mode: Exclude<ExportMode, 'transparent-frames-zip'>,
-  ): Promise<void> {
+  async function handleRefreshPreview(): Promise<void> {
     try {
-      const nextResult = await renderSheetPreview(mode);
-      triggerBlobDownload(nextResult.blob, getSheetFileName(baseFileName, mode === 'transparent-sheet'));
+      await renderSheetPreview();
+      scrollToStep(resultPanelRef);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '预览失败。');
+      setStatus('预览失败，请稍后再试。');
+    }
+  }
+
+  async function handleDownloadSheet(): Promise<void> {
+    try {
+      const preview = await renderSheetPreview();
+      triggerBlobDownload(
+        preview.renderResult.blob,
+        getSheetFileName(baseFileName, preview.transparent),
+      );
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '导出失败。');
       setStatus('导出失败，请稍后再试。');
@@ -630,6 +692,9 @@ function App() {
       y,
     });
     setStatus('背景颜色已采样，可以继续调整容差、羽化和去溢色。');
+    if (!samplePoint) {
+      scrollToStep(chromaActionsRef);
+    }
   }
 
   return (
@@ -642,17 +707,17 @@ function App() {
           <p className="eyebrow">本地处理 · 纯前端扣像 · GitHub Pages 友好</p>
           <h1>视频转序列帧表 2.0</h1>
           <p className="hero-copy">
-            先在参考帧中点击背景颜色，再批量执行浏览器端 ChromaKey 抠像，
-            输出透明序列表 PNG 和透明单帧 ZIP。
+            可以直接生成普通序列图，也可以先在参考帧中点击背景颜色，
+            再批量执行浏览器端 ChromaKey 抠像并导出透明结果。
           </p>
         </section>
 
-        <section className="workspace-grid">
+        <section className={`workspace-grid ${videoMeta ? '' : 'workspace-grid--single'}`}>
           <div className="panel upload-panel">
             <div className="panel-head">
               <h2>1. 上传视频</h2>
-              <span className="status-chip">{status}</span>
             </div>
+            <div className="status-banner">{status}</div>
 
             <button
               className={`dropzone ${isDragging ? 'is-dragging' : ''}`}
@@ -692,102 +757,121 @@ function App() {
               }}
             />
 
-            <div className="stats-grid">
-              {stats.length > 0 ? (
-                stats.map(([label, value]) => (
-                  <div className="stat-card" key={label}>
-                    <span>{label}</span>
-                    <strong>{value}</strong>
+            {videoUrl ? (
+              <div className="video-preview-card">
+                <span>视频预览</span>
+                <video className="upload-video-preview" controls muted playsInline src={videoUrl} />
+              </div>
+            ) : null}
+          </div>
+
+          {videoMeta ? (
+            <div ref={controlsPanelRef} className="panel controls-panel">
+              <div className="panel-head">
+                <h2>2. 提取帧</h2>
+              </div>
+              <p className="panel-subtitle">设置每秒帧数和视频片段，再提取参考帧开始取色。</p>
+
+              <div className="control-grid">
+                <label className="field field-card">
+                  <span>每秒提取帧数</span>
+                  <input
+                    min={1}
+                    max={24}
+                    type="number"
+                    value={framesPerSecond}
+                    onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
+                  />
+                </label>
+
+                <div className="option-card option-card--metric">
+                  <span>预计结果</span>
+                  <strong>{estimatedFrameCount} 帧</strong>
+                  <small>{selectedDuration.toFixed(2)} 秒片段</small>
+                </div>
+              </div>
+
+              <div className="segment-picker">
+                <div className="segment-picker__head">
+                  <span>视频片段</span>
+                  <strong>{formatTimestamp(segmentStart)} - {formatTimestamp(segmentEnd)}</strong>
+                </div>
+
+                <div className="segment-slider" style={segmentTrackStyle}>
+                  <div className="segment-slider__track" />
+                  <div className="segment-slider__active" />
+                  <input
+                    aria-label="开始位置"
+                    className="segment-slider__input segment-slider__input--start"
+                    max={videoMeta.duration}
+                    min={0}
+                    step={0.01}
+                    type="range"
+                    value={segmentStart}
+                    onChange={(event) => {
+                      const nextStart = Math.min(Number(event.target.value), segmentEnd);
+                      setSegmentStart(Number(nextStart.toFixed(3)));
+                    }}
+                  />
+                  <input
+                    aria-label="结束位置"
+                    className="segment-slider__input segment-slider__input--end"
+                    max={videoMeta.duration}
+                    min={0}
+                    step={0.01}
+                    type="range"
+                    value={segmentEnd}
+                    onChange={(event) => {
+                      const nextEnd = Math.max(Number(event.target.value), segmentStart);
+                      setSegmentEnd(Number(nextEnd.toFixed(3)));
+                    }}
+                  />
+                </div>
+
+                <div className="segment-picker__meta">
+                  <div className="segment-pill">
+                    <span>开始</span>
+                    <strong>{formatTimestamp(segmentStart)}</strong>
                   </div>
-                ))
-              ) : (
-                <div className="stat-empty">选择视频后，这里会显示时长、分辨率和参考帧信息。</div>
-              )}
+                  <div className="segment-pill">
+                    <span>结束</span>
+                    <strong>{formatTimestamp(segmentEnd)}</strong>
+                  </div>
+                  <div className="segment-pill">
+                    <span>片段长度</span>
+                    <strong>{selectedDuration.toFixed(2)} 秒</strong>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => {
+                  setReferenceTime(firstSampleTime);
+                  setIsChromaStageOpen(true);
+                  setStatus('已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。');
+                  scrollToStep(chromaPanelRef);
+                }}
+              >
+                {isChromaStageOpen ? '重新提取参考帧' : '提取帧'}
+              </button>
+
+              {frameLimitExceeded ? (
+                <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
+              ) : null}
+              {error ? <p className="error-text">{error}</p> : null}
             </div>
-          </div>
-
-          <div className="panel controls-panel">
-            <div className="panel-head">
-              <h2>2. 抽帧设置</h2>
-              <span>先确定抽几帧，再到下面的预览区直接取背景色。</span>
-            </div>
-
-            <div className="control-grid">
-              <label className="field">
-                <span>抽帧数量</span>
-                <input
-                  min={1}
-                  max={60}
-                  type="number"
-                  value={frameCount}
-                  onChange={(event) => setFrameCount(Number(event.target.value) || 1)}
-                />
-              </label>
-            </div>
-
-            <label className="toggle">
-              <input
-                checked={includeTimestamps}
-                type="checkbox"
-                onChange={(event) => setIncludeTimestamps(event.target.checked)}
-              />
-              <span>在每一帧下显示时间戳</span>
-            </label>
-
-            <div className="option-card">
-              <span>当前流程</span>
-              <strong>
-                上传视频 → 在预览里点背景颜色 → 调边缘参数 → 生成结果 → 再决定导出列数
-              </strong>
-            </div>
-
-            <button
-              className="primary-button"
-              disabled={!canGenerate}
-              type="button"
-              onClick={() => void handleGeneratePreview()}
-            >
-              {isRendering ? '正在处理...' : '3. 生成结果'}
-            </button>
-
-            {error ? <p className="error-text">{error}</p> : null}
-          </div>
+          ) : null}
         </section>
 
-        <section className="panel chroma-panel">
+        {showChromaStage ? (
+        <section ref={chromaPanelRef} className="panel chroma-panel">
           <div className="panel-head panel-head--stack">
             <div>
-              <h2>3. 抠图算法与参考帧</h2>
-              <span>选算法后，直接在左侧预览图里点击背景颜色；右侧可切换结果、蒙版和纯色底检查。</span>
+              <h2>3. 参考帧与抠像预览</h2>
+              <span>直接在左侧预览图里点击背景颜色；右侧可切换结果、蒙版和纯色底检查。</span>
             </div>
-          </div>
-
-          <div className="algorithm-grid">
-            <label className={`algorithm-card ${algorithm === 'enhanced' ? 'is-active' : ''}`}>
-              <input
-                checked={algorithm === 'enhanced'}
-                name="algorithm"
-                type="radio"
-                onChange={() => setAlgorithm('enhanced')}
-              />
-              <div>
-                <strong>⭐ 增强 ChromaKey（推荐）</strong>
-                <p>使用加权 RGB 色距、平滑羽化和边缘去溢色，适合复杂阴影和轻微杂色背景。</p>
-              </div>
-            </label>
-
-            <label className={`algorithm-card algorithm-card--emerald ${algorithm === 'classic' ? 'is-active' : ''}`}>
-              <input
-                checked={algorithm === 'classic'}
-                name="algorithm"
-                type="radio"
-                onChange={() => setAlgorithm('classic')}
-              />
-              <div>
-                <strong>🎯 经典 ChromaKey</strong>
-                <p>更偏硬阈值，参数更直接，适合背景非常纯净的绿幕、蓝幕或单色墙面。</p>
-              </div>
-            </label>
           </div>
 
           <>
@@ -795,8 +879,8 @@ function App() {
                 <label className="range-block">
                   <span>参考帧时间</span>
                   <input
-                    max={videoMeta?.duration ?? 0}
-                    min={0}
+                    max={segmentEnd}
+                    min={segmentStart}
                     step={0.01}
                     type="range"
                     value={referenceTime}
@@ -806,7 +890,7 @@ function App() {
 
                 <div className="reference-meta">
                   <strong>{videoMeta ? formatTimestamp(referenceTime) : '00:00.000'}</strong>
-                  <span>{isReferenceLoading ? '参考帧更新中...' : '点击左侧原图取背景色'}</span>
+                  <span>{isReferenceLoading ? '参考帧更新中...' : `${formatTimestamp(segmentStart)} - ${formatTimestamp(segmentEnd)} 片段内取色`}</span>
                 </div>
               </div>
 
@@ -820,12 +904,12 @@ function App() {
                     <strong>
                       {colorSample
                         ? `RGB(${colorSample.rgb.r}, ${colorSample.rgb.g}, ${colorSample.rgb.b})`
-                        : '尚未选择背景颜色'}
+                        : '未选择背景颜色'}
                     </strong>
                     <span>
                       {samplePoint
                         ? `位置: (${samplePoint.x}, ${samplePoint.y})`
-                        : '请直接在左侧预览图里点击一个背景点'}
+                        : '可直接生成普通序列图，或点击左侧预览图取背景色'}
                     </span>
                   </div>
                 </div>
@@ -845,8 +929,10 @@ function App() {
               <div className="reference-grid">
                 <div className="canvas-card">
                   <div className="canvas-head">
-                    <span>原图</span>
-                    <small>点击背景取样</small>
+                    <div className="canvas-title">
+                      <span>原图</span>
+                      <small>{samplePoint ? '已选背景点，可继续点击更换' : '点击背景取样'}</small>
+                    </div>
                   </div>
                   <div className="canvas-surface">
                     <canvas
@@ -855,11 +941,17 @@ function App() {
                       onClick={handleReferenceCanvasClick}
                     />
                   </div>
+                  <div className="canvas-footer">
+                    <span>{samplePoint ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})` : '点击原图任意背景区域开始取色'}</span>
+                  </div>
                 </div>
 
                 <div className="canvas-card">
                   <div className="canvas-head">
-                    <span>抠图预览结果</span>
+                    <div className="canvas-title">
+                      <span>抠图预览结果</span>
+                      <small>切换模式检查边缘干净度</small>
+                    </div>
                     <div className="segmented-control">
                       <button
                         className={`segmented-button ${previewMode === 'result' ? 'is-active' : ''}`}
@@ -991,33 +1083,31 @@ function App() {
                   </div>
                 </div>
               </div>
+
+              <div ref={chromaActionsRef} className="chroma-actions">
+                <button
+                  className="primary-button chroma-generate-button"
+                  disabled={!canGenerate}
+                  type="button"
+                  onClick={() => void handleGeneratePreview()}
+                >
+                  {isRendering ? '正在生成序列图...' : '4. 生成序列图'}
+                </button>
+              </div>
           </>
         </section>
+        ) : null}
 
-        <section className="result-grid">
+        {showResultStage ? (
+        <section ref={resultPanelRef} className="result-grid">
           <div className="panel preview-panel">
             <div className="panel-head">
-              <h2>4. 结果预览</h2>
-              <span>{result ? `${result.outputWidth} × ${result.outputHeight}` : '等待生成'}</span>
-            </div>
-
-            <div className="segmented-control segmented-control--export">
-              <button
-                className={`segmented-button ${previewExportMode === 'sheet' ? 'is-active' : ''}`}
-                disabled={!hasGeneratedAssets}
-                type="button"
-                onClick={() => void renderSheetPreview('sheet')}
-              >
-                普通序列表
-              </button>
-              <button
-                className={`segmented-button ${previewExportMode === 'transparent-sheet' ? 'is-active' : ''}`}
-                disabled={!canExportTransparent}
-                type="button"
-                onClick={() => void renderSheetPreview('transparent-sheet')}
-              >
-                透明序列表
-              </button>
+              <h2>4. 序列图预览</h2>
+              <span>
+                {result
+                  ? `${resultTransparent ? '透明序列图' : '普通序列图'} · ${result.outputWidth} × ${result.outputHeight}`
+                  : '等待生成'}
+              </span>
             </div>
 
             {result ? (
@@ -1026,7 +1116,7 @@ function App() {
               </div>
             ) : (
               <div className="preview-empty">
-                先生成结果。普通模式会预览标准序列表，扣像模式会默认预览透明序列表。
+                生成完成后，这里会显示当前序列图效果。
               </div>
             )}
           </div>
@@ -1038,7 +1128,7 @@ function App() {
             </div>
 
             <p className="download-copy">
-              导出时再决定列数和间距。普通序列表用于对比，透明导出用于正式使用。
+              导出前可以改列数和间距，先预览当前序列图效果，再决定下载普通图或透明图。
             </p>
 
             <div className="export-config-grid">
@@ -1063,54 +1153,39 @@ function App() {
                   onChange={(event) => setGap(Number(event.target.value) || 0)}
                 />
               </label>
-
-              <label className="field export-config-grid__full">
-                <span>普通序列表背景色</span>
-                <div className="color-field">
-                  <input
-                    type="color"
-                    value={backgroundColor}
-                    onChange={(event) => setBackgroundColor(event.target.value)}
-                  />
-                  <code>{backgroundColor}</code>
-                </div>
-              </label>
             </div>
 
             <div className="export-actions">
               <button
                 className="secondary-button"
-                disabled={!videoMeta || isRendering}
+                disabled={isRendering}
                 type="button"
-                onClick={() => void handleDownloadSheet('sheet')}
+                onClick={() => void handleRefreshPreview()}
               >
-                下载普通序列表 PNG
+                预览当前序列图
               </button>
 
               <button
                 className="secondary-button secondary-button--violet"
-                disabled={!videoMeta || isRendering || !colorKeyOptions}
+                disabled={isRendering}
                 type="button"
-                onClick={() => void handleDownloadSheet('transparent-sheet')}
+                onClick={() => void handleDownloadSheet()}
               >
-                下载透明序列表 PNG
+                {resultTransparent ? '下载透明序列图 PNG' : '下载普通序列图 PNG'}
               </button>
 
               <button
                 className="secondary-button secondary-button--emerald"
-                disabled={!videoMeta || isRendering || !colorKeyOptions}
+                disabled={isRendering || !colorKeyOptions}
                 type="button"
                 onClick={() => void handleDownloadZip()}
               >
                 下载透明单帧 ZIP
               </button>
             </div>
-
-            <div className="hint-card hint-card--soft">
-              透明导出会保留真正的 Alpha 通道；如果想检查边缘是否干净，可以先切回上面的“纯色底”预览。
-            </div>
           </div>
         </section>
+        ) : null}
       </main>
     </div>
   );
