@@ -35,6 +35,4 @@ npm run build
 3. 在仓库 `Settings -> Pages` 中确认 `Build and deployment` 使用 `GitHub Actions`
 4. 后续每次 push 到 `main` 都会自动触发部署
 
-Pages 地址格式：
-
-`https://mowangblog.github.io/video-timesheet-web/`
+Pages 地址格式：[https://mowangblog.github.io/video-timesheet-web/](https://mowangblog.github.io/video-timesheet-web/)
