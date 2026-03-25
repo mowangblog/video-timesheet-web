@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type {
   CropArea,
   ColorKeyOptions,
@@ -22,7 +22,11 @@ import {
   getSheetFileName,
   getZipFileName,
 } from './lib/exportBundle';
-import { getSheetAppearance, renderFrameSheet } from './lib/sheet';
+import {
+  getLayoutMetrics,
+  getSheetAppearance,
+  renderFrameSheet,
+} from './lib/sheet';
 import { formatTimestamp } from './lib/time';
 import {
   cropCanvas,
@@ -38,7 +42,7 @@ import {
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
-const DEFAULT_GAP = 8;
+const DEFAULT_GAP = 0;
 const DEFAULT_KEY_ALGORITHM: KeyAlgorithm = 'enhanced';
 const DEFAULT_TOLERANCE = 28;
 const DEFAULT_SOFTNESS = 14;
@@ -52,6 +56,13 @@ const DEFAULT_CROP_WIDTH_PERCENT = 100;
 const DEFAULT_CROP_HEIGHT_PERCENT = 100;
 const MAX_EXTRACTED_FRAMES = 180;
 const BRAND_ASSET_PATH = `${import.meta.env.BASE_URL}logo.jpg`;
+const EXPORT_PRESETS = [
+  { value: 'original', label: '原始比例', frameSize: undefined },
+  { value: '32', label: '32 × 32', frameSize: 32 },
+  { value: '64', label: '64 × 64', frameSize: 64 },
+  { value: '128', label: '128 × 128', frameSize: 128 },
+  { value: '256', label: '256 × 256', frameSize: 256 },
+] as const;
 const SUPPORT_LINKS = [
   {
     id: 'bilibili',
@@ -88,6 +99,12 @@ type SheetPreviewResult = {
 type ResultPreviewMode = 'sheet' | 'animation';
 
 type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
+type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
+
+type DragSelection = {
+  start: SamplePoint;
+  current: SamplePoint;
+};
 
 function clampPercent(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
@@ -156,6 +173,92 @@ function drawCanvas(
   context.restore();
 }
 
+function getCanvasPoint(
+  event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>,
+  canvas: HTMLCanvasElement,
+  sourceWidth: number,
+  sourceHeight: number,
+): SamplePoint {
+  const rect = canvas.getBoundingClientRect();
+  const ratioX = sourceWidth / rect.width;
+  const ratioY = sourceHeight / rect.height;
+
+  return {
+    x: Math.round((event.clientX - rect.left) * ratioX),
+    y: Math.round((event.clientY - rect.top) * ratioY),
+  };
+}
+
+function getCropAreaFromSelection(
+  start: SamplePoint,
+  end: SamplePoint,
+  sourceWidth: number,
+  sourceHeight: number,
+): CropArea {
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  const width = Math.max(1, Math.abs(end.x - start.x));
+  const height = Math.max(1, Math.abs(end.y - start.y));
+
+  return normalizeCropArea({
+    leftPercent: (left / sourceWidth) * 100,
+    topPercent: (top / sourceHeight) * 100,
+    widthPercent: (width / sourceWidth) * 100,
+    heightPercent: (height / sourceHeight) * 100,
+  });
+}
+
+function drawCropSelectionCanvas(
+  target: HTMLCanvasElement | null,
+  source: HTMLCanvasElement | null,
+  cropArea?: CropArea | null,
+): void {
+  if (!target || !source) {
+    return;
+  }
+
+  target.width = source.width;
+  target.height = source.height;
+
+  const context = target.getContext('2d');
+  if (!context) {
+    return;
+  }
+
+  context.clearRect(0, 0, target.width, target.height);
+  context.drawImage(source, 0, 0);
+
+  if (!cropArea) {
+    return;
+  }
+
+  const bounds = getCropBounds(source.width, source.height, cropArea);
+
+  context.save();
+  context.fillStyle = 'rgba(15, 23, 42, 0.34)';
+  context.fillRect(0, 0, target.width, bounds.y);
+  context.fillRect(0, bounds.y, bounds.x, bounds.height);
+  context.fillRect(bounds.x + bounds.width, bounds.y, target.width - bounds.x - bounds.width, bounds.height);
+  context.fillRect(0, bounds.y + bounds.height, target.width, target.height - bounds.y - bounds.height);
+
+  context.strokeStyle = '#ff8f1f';
+  context.lineWidth = Math.max(2, source.width / 220);
+  context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+
+  context.setLineDash([8, 8]);
+  context.beginPath();
+  context.moveTo(bounds.x + bounds.width / 3, bounds.y);
+  context.lineTo(bounds.x + bounds.width / 3, bounds.y + bounds.height);
+  context.moveTo(bounds.x + (bounds.width / 3) * 2, bounds.y);
+  context.lineTo(bounds.x + (bounds.width / 3) * 2, bounds.y + bounds.height);
+  context.moveTo(bounds.x, bounds.y + bounds.height / 3);
+  context.lineTo(bounds.x + bounds.width, bounds.y + bounds.height / 3);
+  context.moveTo(bounds.x, bounds.y + (bounds.height / 3) * 2);
+  context.lineTo(bounds.x + bounds.width, bounds.y + (bounds.height / 3) * 2);
+  context.stroke();
+  context.restore();
+}
+
 function toTransparentSheetFrames(processedFrames: ProcessedFrame[]): ExtractedFrame[] {
   return processedFrames.map(({ processedImage, ...frame }) => ({
     ...frame,
@@ -217,6 +320,7 @@ function App() {
   const [segmentEnd, setSegmentEnd] = useState(0);
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [gap, setGap] = useState(DEFAULT_GAP);
+  const [exportPreset, setExportPreset] = useState<ExportPresetValue>('original');
   const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE);
   const [softness, setSoftness] = useState(DEFAULT_SOFTNESS);
   const [despill, setDespill] = useState(DEFAULT_DESPILL);
@@ -233,6 +337,7 @@ function App() {
   const [cropTopPercent, setCropTopPercent] = useState(DEFAULT_CROP_TOP_PERCENT);
   const [cropWidthPercent, setCropWidthPercent] = useState(DEFAULT_CROP_WIDTH_PERCENT);
   const [cropHeightPercent, setCropHeightPercent] = useState(DEFAULT_CROP_HEIGHT_PERCENT);
+  const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
@@ -252,15 +357,22 @@ function App() {
   const [processedFrames, setProcessedFrames] = useState<ProcessedFrame[] | null>(null);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const cropSelectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cropPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resultAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const controlsPanelRef = useRef<HTMLDivElement | null>(null);
+  const cropPanelRef = useRef<HTMLElement | null>(null);
   const chromaPanelRef = useRef<HTMLElement | null>(null);
   const chromaActionsRef = useRef<HTMLDivElement | null>(null);
   const resultPanelRef = useRef<HTMLElement | null>(null);
   const readerRef = useRef<VideoFrameReader | null>(null);
   const readerTokenRef = useRef(0);
+  const pendingChromaScrollRef = useRef(false);
+  const pendingChromaScrollTopRef = useRef<number | null>(null);
+  const pendingResultScrollRef = useRef(false);
+  const pendingResultScrollTopRef = useRef<number | null>(null);
   const hasInitializedInvalidationRef = useRef(false);
   const latestVideoUrlRef = useRef<string | null>(null);
   const latestResultRef = useRef<RenderResult | null>(null);
@@ -269,6 +381,7 @@ function App() {
     columns,
     gap,
     backgroundColor: '#ffffff',
+    frameSize: EXPORT_PRESETS.find((preset) => preset.value === exportPreset)?.frameSize,
   };
 
   const baseFileName = useMemo(
@@ -320,6 +433,34 @@ function App() {
         : null,
     [cropArea, videoMeta],
   );
+  const activeCropArea = useMemo<CropArea>(
+    () =>
+      dragSelection && referenceRawFrame
+        ? getCropAreaFromSelection(
+            dragSelection.start,
+            dragSelection.current,
+            referenceRawFrame.width,
+            referenceRawFrame.height,
+          )
+        : cropArea,
+    [cropArea, dragSelection, referenceRawFrame],
+  );
+  const activeCropBounds = useMemo(
+    () =>
+      videoMeta
+        ? getCropBounds(videoMeta.width, videoMeta.height, activeCropArea)
+        : null,
+    [activeCropArea, videoMeta],
+  );
+  const cropSurfaceStyle = useMemo<CSSProperties | undefined>(
+    () =>
+      videoMeta
+        ? {
+            aspectRatio: `${videoMeta.width} / ${videoMeta.height}`,
+          }
+        : undefined,
+    [videoMeta],
+  );
   const isCropApplied = Boolean(
     cropBounds &&
       videoMeta &&
@@ -339,6 +480,32 @@ function App() {
       height: cropBounds.height,
     };
   }, [cropBounds, videoMeta]);
+  const exportFrameSize = useMemo(
+    () => EXPORT_PRESETS.find((preset) => preset.value === exportPreset)?.frameSize,
+    [exportPreset],
+  );
+  const exportLayoutMetrics = useMemo(
+    () =>
+      outputVideoMeta
+        ? getLayoutMetrics(
+            outputVideoMeta,
+            extractedFrames?.length ?? estimatedFrameCount,
+            sheetOptions,
+            false,
+          )
+        : null,
+    [estimatedFrameCount, extractedFrames?.length, outputVideoMeta, sheetOptions],
+  );
+  const exportTargetSize = useMemo(
+    () =>
+      exportLayoutMetrics
+        ? {
+            width: exportLayoutMetrics.canvasWidth,
+            height: exportLayoutMetrics.canvasHeight,
+          }
+        : null,
+    [exportLayoutMetrics],
+  );
 
   const colorKeyOptions = useMemo<ColorKeyOptions | null>(() => {
     if (!colorSample) {
@@ -443,6 +610,36 @@ function App() {
       }
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (
+      !pendingChromaScrollRef.current ||
+      !showChromaStage ||
+      pendingChromaScrollTopRef.current === null
+    ) {
+      return;
+    }
+
+    window.scrollTo({
+      top: pendingChromaScrollTopRef.current,
+      left: window.scrollX,
+    });
+  }, [showChromaStage]);
+
+  useLayoutEffect(() => {
+    if (
+      !pendingResultScrollRef.current ||
+      !showResultStage ||
+      pendingResultScrollTopRef.current === null
+    ) {
+      return;
+    }
+
+    window.scrollTo({
+      top: pendingResultScrollTopRef.current,
+      left: window.scrollX,
+    });
+  }, [showResultStage]);
 
   useEffect(() => {
     if (!videoUrl || !videoMeta) {
@@ -615,6 +812,21 @@ function App() {
   }, [referenceFrame, samplePoint]);
 
   useEffect(() => {
+    drawCropSelectionCanvas(cropSelectionCanvasRef.current, referenceRawFrame, activeCropArea);
+  }, [activeCropArea, referenceRawFrame]);
+
+  useEffect(() => {
+    if (!referenceRawFrame) {
+      return;
+    }
+
+    drawCanvas(
+      cropPreviewCanvasRef.current,
+      cropCanvas(referenceRawFrame, activeCropArea),
+    );
+  }, [activeCropArea, referenceRawFrame]);
+
+  useEffect(() => {
     const source =
       previewMode === 'mask'
         ? referenceMaskFrame
@@ -627,6 +839,74 @@ function App() {
       previewMode === 'solid' ? solidPreviewColor : undefined,
     );
   }, [previewMode, referenceFrame, referenceMaskFrame, referenceResultFrame, solidPreviewColor]);
+
+  useEffect(() => {
+    if (
+      !pendingChromaScrollRef.current ||
+      !showChromaStage ||
+      !referenceFrame ||
+      !referenceResultFrame ||
+      isReferenceLoading
+    ) {
+      return;
+    }
+
+    const referenceCanvas = referenceCanvasRef.current;
+    const previewCanvas = previewCanvasRef.current;
+    if (
+      !referenceCanvas ||
+      !previewCanvas ||
+      referenceCanvas.width === 0 ||
+      referenceCanvas.height === 0 ||
+      previewCanvas.width === 0 ||
+      previewCanvas.height === 0
+    ) {
+      return;
+    }
+
+    let nextFrameId = 0;
+    let finalFrameId = 0;
+
+    nextFrameId = window.requestAnimationFrame(() => {
+      finalFrameId = window.requestAnimationFrame(() => {
+        pendingChromaScrollRef.current = false;
+        pendingChromaScrollTopRef.current = null;
+        scrollToStep(chromaPanelRef);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(nextFrameId);
+      window.cancelAnimationFrame(finalFrameId);
+    };
+  }, [isReferenceLoading, referenceFrame, referenceResultFrame, showChromaStage]);
+
+  useEffect(() => {
+    if (
+      !pendingResultScrollRef.current ||
+      !showResultStage ||
+      !result ||
+      resultPreviewMode !== 'sheet'
+    ) {
+      return;
+    }
+
+    let nextFrameId = 0;
+    let finalFrameId = 0;
+
+    nextFrameId = window.requestAnimationFrame(() => {
+      finalFrameId = window.requestAnimationFrame(() => {
+        pendingResultScrollRef.current = false;
+        pendingResultScrollTopRef.current = null;
+        scrollToStep(resultPanelRef);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(nextFrameId);
+      window.cancelAnimationFrame(finalFrameId);
+    };
+  }, [result, resultPreviewMode, showResultStage]);
 
   useEffect(() => {
     if (!animationFrames.length) {
@@ -713,6 +993,10 @@ function App() {
     setSamplePoint(null);
     setColorSample(null);
     setIsChromaStageOpen(false);
+    pendingChromaScrollRef.current = false;
+    pendingChromaScrollTopRef.current = null;
+    pendingResultScrollRef.current = false;
+    pendingResultScrollTopRef.current = null;
     clearGeneratedAssets();
 
     if (videoUrl) {
@@ -728,8 +1012,8 @@ function App() {
       setSegmentEnd(Number(asset.meta.duration.toFixed(3)));
       setReferenceTime(0);
       setPreviewMode('result');
-      setStatus('视频已就绪，点击“提取帧”开始选择背景颜色。');
-      scrollToStep(controlsPanelRef);
+      setStatus('视频已就绪，请先裁剪画面，再设置片段并提取参考帧。');
+      scrollToStep(cropPanelRef);
     } catch (nextError) {
       setVideoMeta(null);
       setStatus('读取失败，请换一个文件后重试。');
@@ -848,10 +1132,13 @@ function App() {
 
   async function handleGeneratePreview(): Promise<void> {
     try {
+      pendingResultScrollTopRef.current = window.scrollY;
+      pendingResultScrollRef.current = true;
       const assets = await ensureAssets();
       await renderSheetPreview(assets);
-      scrollToStep(resultPanelRef);
     } catch (nextError) {
+      pendingResultScrollRef.current = false;
+      pendingResultScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       setStatus('生成失败，请调整参数后重试。');
     }
@@ -859,9 +1146,12 @@ function App() {
 
   async function handleRefreshPreview(): Promise<void> {
     try {
+      pendingResultScrollTopRef.current = window.scrollY;
+      pendingResultScrollRef.current = true;
       await renderSheetPreview();
-      scrollToStep(resultPanelRef);
     } catch (nextError) {
+      pendingResultScrollRef.current = false;
+      pendingResultScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '预览失败。');
       setStatus('预览失败，请稍后再试。');
     }
@@ -902,30 +1192,125 @@ function App() {
   }
 
   function resetCropArea(): void {
+    setDragSelection(null);
     setCropLeftPercent(DEFAULT_CROP_LEFT_PERCENT);
     setCropTopPercent(DEFAULT_CROP_TOP_PERCENT);
     setCropWidthPercent(DEFAULT_CROP_WIDTH_PERCENT);
     setCropHeightPercent(DEFAULT_CROP_HEIGHT_PERCENT);
   }
 
+  function applyCropArea(nextCropArea: CropArea): void {
+    const normalized = normalizeCropArea(nextCropArea);
+    setCropLeftPercent(normalized.leftPercent);
+    setCropTopPercent(normalized.topPercent);
+    setCropWidthPercent(normalized.widthPercent);
+    setCropHeightPercent(normalized.heightPercent);
+  }
+
   function handleCropLeftChange(value: number): void {
+    setDragSelection(null);
     const nextLeft = clampPercent(value, 0, 99);
     setCropLeftPercent(nextLeft);
     setCropWidthPercent((current) => clampPercent(current, 1, 100 - nextLeft));
   }
 
   function handleCropTopChange(value: number): void {
+    setDragSelection(null);
     const nextTop = clampPercent(value, 0, 99);
     setCropTopPercent(nextTop);
     setCropHeightPercent((current) => clampPercent(current, 1, 100 - nextTop));
   }
 
   function handleCropWidthChange(value: number): void {
+    setDragSelection(null);
     setCropWidthPercent(clampPercent(value, 1, 100 - cropLeftPercent));
   }
 
   function handleCropHeightChange(value: number): void {
+    setDragSelection(null);
     setCropHeightPercent(clampPercent(value, 1, 100 - cropTopPercent));
+  }
+
+  function handleCropPointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceRawFrame) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceRawFrame.width,
+      referenceRawFrame.height,
+    );
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragSelection({
+      start: point,
+      current: point,
+    });
+  }
+
+  function handleCropPointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceRawFrame || !dragSelection) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceRawFrame.width,
+      referenceRawFrame.height,
+    );
+    setDragSelection((current) =>
+      current
+        ? {
+            ...current,
+            current: point,
+          }
+        : current,
+    );
+  }
+
+  function finishCropSelection(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceRawFrame || !dragSelection) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceRawFrame.width,
+      referenceRawFrame.height,
+    );
+    const selectionWidth = Math.abs(point.x - dragSelection.start.x);
+    const selectionHeight = Math.abs(point.y - dragSelection.start.y);
+
+    event.currentTarget.releasePointerCapture(event.pointerId);
+
+    if (selectionWidth < 8 || selectionHeight < 8) {
+      setDragSelection(null);
+      setStatus('框选区域过小，请重新拖拽鼠标选择裁剪范围。');
+      return;
+    }
+
+    applyCropArea(
+      getCropAreaFromSelection(
+        dragSelection.start,
+        point,
+        referenceRawFrame.width,
+        referenceRawFrame.height,
+      ),
+    );
+    setDragSelection(null);
+    setStatus('裁剪区域已更新，下一步请设置片段并提取参考帧。');
+    scrollToStep(controlsPanelRef);
+  }
+
+  function handleCropPointerCancel(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    setDragSelection(null);
   }
 
   function handleReferenceCanvasClick(event: React.MouseEvent<HTMLCanvasElement>): void {
@@ -992,39 +1377,13 @@ function App() {
           </div>
         </section>
 
-        <section className={`workspace-grid ${videoMeta ? '' : 'workspace-grid--single'}`}>
+        <div className="status-banner status-banner--global">{status}</div>
+
+        <section className="workspace-grid workspace-grid--single">
           <div className="panel upload-panel">
             <div className="panel-head">
               <h2>1. 上传视频</h2>
             </div>
-            <div className="status-banner">{status}</div>
-
-            <button
-              className={`dropzone ${isDragging ? 'is-dragging' : ''}`}
-              type="button"
-              onClick={() => inputRef.current?.click()}
-              onDragEnter={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDragLeave={(event) => {
-                event.preventDefault();
-                setIsDragging(false);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setIsDragging(false);
-                handleDrop(event.dataTransfer.files);
-              }}
-            >
-              <span className="dropzone-kicker">拖放视频到这里</span>
-              <strong>或点击选择本地文件</strong>
-              <small>推荐使用单色背景视频。纯前端处理时，长视频会消耗更多浏览器内存。</small>
-            </button>
 
             <input
               ref={inputRef}
@@ -1037,191 +1396,284 @@ function App() {
               }}
             />
 
-            {videoUrl ? (
-              <div className="video-preview-card">
-                <span>视频预览</span>
-                <video className="upload-video-preview" controls muted playsInline src={videoUrl} />
-              </div>
-            ) : null}
-          </div>
-
-          {videoMeta ? (
-            <div ref={controlsPanelRef} className="panel controls-panel">
-              <div className="panel-head">
-                <h2>2. 提取帧</h2>
-              </div>
-              <p className="panel-subtitle">设置每秒帧数和视频片段，再提取参考帧开始取色。</p>
-
-              <div className="control-grid">
-                <label className="field field-card">
-                  <span>每秒提取帧数</span>
-                  <input
-                    min={1}
-                    max={24}
-                    type="number"
-                    value={framesPerSecond}
-                    onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
-                  />
-                </label>
-
-                <div className="option-card option-card--metric">
-                  <span>预计结果</span>
-                  <strong>{estimatedFrameCount} 帧</strong>
-                  <small>{selectedDuration.toFixed(2)} 秒片段</small>
-                </div>
-              </div>
-
-              <div className="segment-picker">
-                <div className="segment-picker__head">
-                  <span>视频片段</span>
-                  <strong>{formatTimestamp(segmentStart)} - {formatTimestamp(segmentEnd)}</strong>
-                </div>
-
-                <div className="segment-slider" style={segmentTrackStyle}>
-                  <div className="segment-slider__track" />
-                  <div className="segment-slider__active" />
-                  <input
-                    aria-label="开始位置"
-                    className="segment-slider__input segment-slider__input--start"
-                    max={videoMeta.duration}
-                    min={0}
-                    step={0.01}
-                    type="range"
-                    value={segmentStart}
-                    onChange={(event) => {
-                      const nextStart = Math.min(Number(event.target.value), segmentEnd);
-                      setSegmentStart(Number(nextStart.toFixed(3)));
-                    }}
-                  />
-                  <input
-                    aria-label="结束位置"
-                    className="segment-slider__input segment-slider__input--end"
-                    max={videoMeta.duration}
-                    min={0}
-                    step={0.01}
-                    type="range"
-                    value={segmentEnd}
-                    onChange={(event) => {
-                      const nextEnd = Math.max(Number(event.target.value), segmentStart);
-                      setSegmentEnd(Number(nextEnd.toFixed(3)));
-                    }}
-                  />
-                </div>
-
-                <div className="segment-picker__meta">
-                  <div className="segment-pill">
-                    <span>开始</span>
-                    <strong>{formatTimestamp(segmentStart)}</strong>
-                  </div>
-                  <div className="segment-pill">
-                    <span>结束</span>
-                    <strong>{formatTimestamp(segmentEnd)}</strong>
-                  </div>
-                  <div className="segment-pill">
-                    <span>片段长度</span>
-                    <strong>{selectedDuration.toFixed(2)} 秒</strong>
-                  </div>
-                </div>
-              </div>
-
-              <div className="crop-picker">
-                <div className="segment-picker__head">
-                  <span>画面裁剪</span>
-                  <strong>
-                    {cropBounds
-                      ? `${cropBounds.width} × ${cropBounds.height}`
-                      : `${videoMeta.width} × ${videoMeta.height}`}
-                  </strong>
-                </div>
-
-                <div className="crop-grid">
-                  <label className="field">
-                    <span>左侧偏移 (%)</span>
-                    <input
-                      min={0}
-                      max={99}
-                      type="number"
-                      value={cropLeftPercent}
-                      onChange={(event) => handleCropLeftChange(Number(event.target.value) || 0)}
-                    />
-                  </label>
-
-                  <label className="field">
-                    <span>顶部偏移 (%)</span>
-                    <input
-                      min={0}
-                      max={99}
-                      type="number"
-                      value={cropTopPercent}
-                      onChange={(event) => handleCropTopChange(Number(event.target.value) || 0)}
-                    />
-                  </label>
-
-                  <label className="field">
-                    <span>裁剪宽度 (%)</span>
-                    <input
-                      min={1}
-                      max={100 - cropLeftPercent}
-                      type="number"
-                      value={cropWidthPercent}
-                      onChange={(event) => handleCropWidthChange(Number(event.target.value) || 1)}
-                    />
-                  </label>
-
-                  <label className="field">
-                    <span>裁剪高度 (%)</span>
-                    <input
-                      min={1}
-                      max={100 - cropTopPercent}
-                      type="number"
-                      value={cropHeightPercent}
-                      onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
-                    />
-                  </label>
-                </div>
-
-                <div className="crop-picker__footer">
-                  <small>
-                    当前输出尺寸：{cropBounds?.width ?? videoMeta.width} ×{' '}
-                    {cropBounds?.height ?? videoMeta.height}
-                  </small>
-                  <button
-                    className="ghost-button"
-                    disabled={!isCropApplied}
-                    type="button"
-                    onClick={resetCropArea}
-                  >
-                    重置裁剪
-                  </button>
-                </div>
-              </div>
-
+            <div className={`upload-layout ${videoUrl ? 'upload-layout--with-preview' : ''}`}>
               <button
-                className="primary-button"
+                className={`dropzone ${isDragging ? 'is-dragging' : ''}`}
                 type="button"
-                onClick={() => {
-                  setReferenceTime(firstSampleTime);
-                  setIsChromaStageOpen(true);
-                  setStatus('已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。');
-                  scrollToStep(chromaPanelRef);
+                onClick={() => inputRef.current?.click()}
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setIsDragging(false);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setIsDragging(false);
+                  handleDrop(event.dataTransfer.files);
                 }}
               >
-                {isChromaStageOpen ? '重新提取参考帧' : '提取帧'}
+                <span className="dropzone-kicker">拖放视频到这里</span>
+                <strong>或点击选择本地文件</strong>
+                <small>推荐使用单色背景视频。纯前端处理时，长视频会消耗更多浏览器内存。</small>
               </button>
 
-              {frameLimitExceeded ? (
-                <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
+              {videoUrl ? (
+                <div className="video-preview-card">
+                  <span>视频预览</span>
+                  <video className="upload-video-preview" controls muted playsInline src={videoUrl} />
+                </div>
               ) : null}
-              {error ? <p className="error-text">{error}</p> : null}
             </div>
-          ) : null}
+
+          </div>
         </section>
+
+        {videoMeta ? (
+          <section ref={cropPanelRef} className="crop-row">
+            <div className="crop-picker crop-picker--row">
+              <div className="crop-preview-grid">
+                <div className="canvas-card">
+                  <div className="canvas-head">
+                    <div className="canvas-title">
+                      <span>鼠标框选裁剪</span>
+                      <small>在参考画面上拖拽，直接选择要保留的区域</small>
+                    </div>
+                  </div>
+                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
+                    {referenceRawFrame ? (
+                      <canvas
+                        ref={cropSelectionCanvasRef}
+                        className="preview-canvas crop-preview-canvas crop-selection-canvas"
+                        onPointerCancel={handleCropPointerCancel}
+                        onPointerDown={handleCropPointerDown}
+                        onPointerMove={handleCropPointerMove}
+                        onPointerUp={finishCropSelection}
+                      />
+                    ) : (
+                      <div className="crop-placeholder">视频读取后可直接鼠标框选裁剪区域</div>
+                    )}
+                  </div>
+                  <div className="canvas-footer">
+                    <span>也可以继续用下面的数值输入精确微调</span>
+                  </div>
+                </div>
+
+                <div className="canvas-card">
+                  <div className="canvas-head">
+                    <div className="canvas-title">
+                      <span>裁剪预览</span>
+                      <small>这里会实时显示当前裁剪后的输出画面</small>
+                    </div>
+                  </div>
+                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
+                    {referenceRawFrame ? (
+                      <canvas
+                        ref={cropPreviewCanvasRef}
+                        className="preview-canvas crop-preview-canvas"
+                      />
+                    ) : (
+                      <div className="crop-placeholder">视频读取后，这里会显示裁剪预览</div>
+                    )}
+                  </div>
+                  <div className="canvas-footer">
+                    <span>
+                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
+                      {activeCropBounds?.height ?? videoMeta.height}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="crop-controls-grid">
+                <div className="crop-controls-pane">
+                  <div className="crop-controls-head">
+                    <strong>2. 画面裁剪</strong>
+                    <span>
+                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
+                      {activeCropBounds?.height ?? videoMeta.height}
+                    </span>
+                  </div>
+
+                  <div className="crop-controls-head">
+                    <strong>裁剪微调</strong>
+                    <span>继续用数值做精确裁剪</span>
+                  </div>
+
+                  <div className="crop-grid">
+                    <label className="field">
+                      <span>左侧偏移 (%)</span>
+                      <input
+                        min={0}
+                        max={99}
+                        type="number"
+                        value={cropLeftPercent}
+                        onChange={(event) => handleCropLeftChange(Number(event.target.value) || 0)}
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>顶部偏移 (%)</span>
+                      <input
+                        min={0}
+                        max={99}
+                        type="number"
+                        value={cropTopPercent}
+                        onChange={(event) => handleCropTopChange(Number(event.target.value) || 0)}
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>裁剪宽度 (%)</span>
+                      <input
+                        min={1}
+                        max={100 - cropLeftPercent}
+                        type="number"
+                        value={cropWidthPercent}
+                        onChange={(event) => handleCropWidthChange(Number(event.target.value) || 1)}
+                      />
+                    </label>
+
+                    <label className="field">
+                      <span>裁剪高度 (%)</span>
+                      <input
+                        min={1}
+                        max={100 - cropTopPercent}
+                        type="number"
+                        value={cropHeightPercent}
+                        onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="crop-picker__footer">
+                    <small>
+                      你可以直接鼠标框选，也可以继续用百分比数值精确裁剪。
+                    </small>
+                    <button
+                      className="ghost-button"
+                      disabled={!isCropApplied}
+                      type="button"
+                      onClick={resetCropArea}
+                    >
+                      重置裁剪
+                    </button>
+                  </div>
+                </div>
+
+                <div ref={controlsPanelRef} className="controls-pane">
+                  <div className="crop-controls-head">
+                    <strong>3. 提取帧</strong>
+                    <span>先确认片段和每秒帧数，再提取参考帧开始取色。</span>
+                  </div>
+
+                  <div className="control-grid">
+                    <label className="field field-card">
+                      <span>每秒提取帧数</span>
+                      <input
+                        min={1}
+                        max={24}
+                        type="number"
+                        value={framesPerSecond}
+                        onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
+                      />
+                    </label>
+
+                    <div className="option-card option-card--metric">
+                      <span>预计结果</span>
+                      <strong>{estimatedFrameCount} 帧</strong>
+                      <small>{selectedDuration.toFixed(2)} 秒片段</small>
+                    </div>
+                  </div>
+
+                  <div className="segment-picker">
+                    <div className="segment-picker__head">
+                      <span>视频片段</span>
+                      <strong>{formatTimestamp(segmentStart)} - {formatTimestamp(segmentEnd)}</strong>
+                    </div>
+
+                    <div className="segment-slider" style={segmentTrackStyle}>
+                      <div className="segment-slider__track" />
+                      <div className="segment-slider__active" />
+                      <input
+                        aria-label="开始位置"
+                        className="segment-slider__input segment-slider__input--start"
+                        max={videoMeta.duration}
+                        min={0}
+                        step={0.01}
+                        type="range"
+                        value={segmentStart}
+                        onChange={(event) => {
+                          const nextStart = Math.min(Number(event.target.value), segmentEnd);
+                          setSegmentStart(Number(nextStart.toFixed(3)));
+                        }}
+                      />
+                      <input
+                        aria-label="结束位置"
+                        className="segment-slider__input segment-slider__input--end"
+                        max={videoMeta.duration}
+                        min={0}
+                        step={0.01}
+                        type="range"
+                        value={segmentEnd}
+                        onChange={(event) => {
+                          const nextEnd = Math.max(Number(event.target.value), segmentStart);
+                          setSegmentEnd(Number(nextEnd.toFixed(3)));
+                        }}
+                      />
+                    </div>
+
+                    <div className="segment-picker__meta">
+                      <div className="segment-pill">
+                        <span>开始</span>
+                        <strong>{formatTimestamp(segmentStart)}</strong>
+                      </div>
+                      <div className="segment-pill">
+                        <span>结束</span>
+                        <strong>{formatTimestamp(segmentEnd)}</strong>
+                      </div>
+                      <div className="segment-pill">
+                        <span>片段长度</span>
+                        <strong>{selectedDuration.toFixed(2)} 秒</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    className="primary-button"
+                    type="button"
+                      onClick={() => {
+                        pendingChromaScrollTopRef.current = window.scrollY;
+                        setReferenceTime(firstSampleTime);
+                        setIsChromaStageOpen(true);
+                        pendingChromaScrollRef.current = true;
+                        setStatus('已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。');
+                      }}
+                  >
+                    {isChromaStageOpen ? '重新提取参考帧' : '提取帧'}
+                  </button>
+
+                  {frameLimitExceeded ? (
+                    <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
+                  ) : null}
+                  {error ? <p className="error-text">{error}</p> : null}
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : null}
 
         {showChromaStage ? (
         <section ref={chromaPanelRef} className="panel chroma-panel">
           <div className="panel-head panel-head--stack">
             <div>
-              <h2>3. 参考帧与抠像预览</h2>
+              <h2>4. 参考帧与抠像预览</h2>
               <span>直接在左侧预览图里点击背景颜色；右侧可切换结果、蒙版和纯色底检查。</span>
             </div>
           </div>
@@ -1454,7 +1906,7 @@ function App() {
         <section ref={resultPanelRef} className="result-grid">
           <div className="panel preview-panel">
             <div className="panel-head">
-              <h2>4. 序列图预览</h2>
+              <h2>5. 序列图预览</h2>
               <span>
                 {result
                   ? `${resultTransparent ? '透明序列图' : '普通序列图'} · ${result.outputWidth} × ${result.outputHeight}`
@@ -1540,12 +1992,12 @@ function App() {
 
           <div className="panel download-panel">
             <div className="panel-head">
-              <h2>5. 导出结果</h2>
+              <h2>6. 导出结果</h2>
               <span>本地下载</span>
             </div>
 
             <p className="download-copy">
-              导出前可以改列数和间距，先预览当前序列图效果，再决定下载普通图或透明图。
+              导出前可以改列数和单帧尺寸预设；精灵图导出默认保持 0 间距，最终会对每一帧做高质量智能缩放。
             </p>
 
             <div className="export-config-grid">
@@ -1561,7 +2013,7 @@ function App() {
               </label>
 
               <label className="field">
-                <span>导出间距</span>
+                <span>导出间距（精灵图建议 0）</span>
                 <input
                   min={0}
                   max={48}
@@ -1570,6 +2022,32 @@ function App() {
                   onChange={(event) => setGap(Number(event.target.value) || 0)}
                 />
               </label>
+
+              <label className="field">
+                <span>单帧尺寸预设</span>
+                <select
+                  value={exportPreset}
+                  onChange={(event) => setExportPreset(event.target.value as ExportPresetValue)}
+                >
+                  {EXPORT_PRESETS.map((preset) => (
+                    <option key={preset.value} value={preset.value}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="option-card option-card--metric export-config-grid__full">
+                <span>预估导出尺寸</span>
+                <strong>
+                  {exportTargetSize
+                    ? `${exportTargetSize.width} × ${exportTargetSize.height}`
+                    : '等待生成'}
+                </strong>
+                <small>
+                  {exportFrameSize ? `智能缩放到每帧 ${exportFrameSize} × ${exportFrameSize}` : '保持原始帧比例尺寸'}
+                </small>
+              </div>
             </div>
 
             <div className="export-actions">

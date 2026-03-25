@@ -303,6 +303,14 @@ button {
   line-height: 1.45;
 }
 
+.status-banner--global {
+  display: flex;
+  width: 100%;
+  margin: 0 0 18px;
+  padding: 12px 16px;
+  border-radius: 18px;
+}
+
 .panel-subtitle {
   margin: -6px 0 16px;
   color: #6b7280;
@@ -364,14 +372,30 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.upload-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.upload-layout--with-preview {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+  align-items: start;
+}
+
 .video-preview-card {
   display: grid;
   gap: 10px;
-  margin-top: 16px;
+  width: 100%;
+  min-height: 236px;
   padding: 14px 16px;
   border-radius: 18px;
   background: #f7f8fd;
   border: 1px solid rgba(113, 92, 255, 0.1);
+}
+
+.upload-layout--with-preview .dropzone {
+  min-height: 236px;
+  align-content: center;
 }
 
 .video-preview-card span {
@@ -383,8 +407,9 @@ button {
 .upload-video-preview {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 4 / 3;
   object-fit: contain;
+  max-height: 180px;
   border-radius: 16px;
   background: #0f172a;
 }
@@ -526,9 +551,117 @@ button {
   border: 1px solid rgba(113, 92, 255, 0.1);
 }
 
+.crop-row {
+  margin-bottom: 18px;
+}
+
+.controls-row {
+  margin-bottom: 18px;
+}
+
+.crop-controls-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.crop-controls-pane,
+.controls-pane {
+  display: grid;
+  gap: 12px;
+  height: 100%;
+  align-content: start;
+  padding: 14px;
+  border-radius: 18px;
+  background: #f7f8fd;
+  border: 1px solid rgba(113, 92, 255, 0.1);
+}
+
+.controls-pane {
+  gap: 10px;
+}
+
+.crop-controls-head {
+  display: grid;
+  gap: 4px;
+  color: #4b5563;
+}
+
+.crop-controls-head strong {
+  font-size: 1.06rem;
+  color: #132238;
+}
+
+.crop-controls-head span {
+  color: #6b7280;
+  font-size: 0.92rem;
+}
+
+.crop-controls-pane .field,
+.controls-pane .field {
+  gap: 6px;
+}
+
+.crop-controls-pane .field input[type="number"],
+.controls-pane .field input[type="number"] {
+  min-height: 46px;
+  padding: 10px 12px;
+}
+
+.controls-pane .field-card,
+.controls-pane .option-card--metric {
+  min-height: 92px;
+}
+
+.controls-pane .field-card,
+.controls-pane .option-card,
+.controls-pane .segment-picker,
+.crop-controls-pane .crop-picker__footer {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
+.controls-pane .control-grid {
+  gap: 10px;
+}
+
+.controls-pane .segment-picker {
+  gap: 10px;
+  padding: 12px;
+}
+
+.controls-pane .segment-picker__meta {
+  gap: 8px;
+}
+
+.controls-pane .segment-pill {
+  padding: 10px 12px;
+}
+
+.controls-pane .primary-button {
+  min-height: 46px;
+}
+
+.crop-picker--row {
+  padding: 20px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(113, 92, 255, 0.11);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 14px 38px rgba(44, 62, 110, 0.06);
+}
+
 .crop-grid {
   display: grid;
   gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.crop-preview-grid {
+  display: grid;
+  gap: 16px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -545,6 +678,33 @@ button {
 
 .crop-picker .ghost-button {
   min-width: 112px;
+}
+
+.crop-selection-canvas {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.crop-canvas-surface {
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.crop-preview-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  height: auto;
+}
+
+.crop-placeholder {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 20px;
+  color: #6a7783;
+  text-align: center;
 }
 
 .segment-picker__head {
@@ -688,6 +848,16 @@ button {
   border-radius: 14px;
   border: 1px solid rgba(113, 92, 255, 0.12);
   background: #fbfcff;
+}
+
+.field select {
+  width: 100%;
+  min-height: 50px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(113, 92, 255, 0.12);
+  background: #fbfcff;
+  color: #132238;
 }
 
 .color-field {
@@ -1266,6 +1436,8 @@ button {
   }
 
   .mode-switch,
+  .upload-layout--with-preview,
+  .crop-controls-grid,
   .control-grid,
   .stats-grid,
   .export-config-grid,
@@ -1274,6 +1446,10 @@ button {
   }
 
   .segment-picker__meta {
+    grid-template-columns: 1fr;
+  }
+
+  .crop-preview-grid {
     grid-template-columns: 1fr;
   }
 

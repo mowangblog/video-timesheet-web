@@ -44,6 +44,7 @@ export type SheetOptions = {
   columns: number;
   gap: number;
   backgroundColor: string;
+  frameSize?: number | null;
 };
 
 export type RenderResult = {

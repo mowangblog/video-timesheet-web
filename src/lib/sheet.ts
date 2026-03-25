@@ -1,3 +1,4 @@
+import picaFactory from 'pica';
 import type {
   ExtractedFrame,
   LayoutMetrics,
@@ -11,6 +12,7 @@ const MAX_FRAME_WIDTH = 320;
 const LABEL_FONT_SIZE = 16;
 const LABEL_BLOCK_HEIGHT = 30;
 const CARD_PADDING = 10;
+const pica = picaFactory();
 
 export function getLayoutMetrics(
   meta: VideoMeta,
@@ -19,13 +21,16 @@ export function getLayoutMetrics(
   includeTimestamps: boolean,
 ): LayoutMetrics {
   const rows = Math.max(1, Math.ceil(frameCount / sheetOptions.columns));
-  const frameWidth = Math.min(MAX_FRAME_WIDTH, meta.width);
-  const frameHeight = Math.round((meta.height / meta.width) * frameWidth);
+  const frameSize = sheetOptions.frameSize ?? null;
+  const frameWidth = frameSize ?? Math.min(MAX_FRAME_WIDTH, meta.width);
+  const frameHeight = frameSize ?? Math.round((meta.height / meta.width) * frameWidth);
   const labelBlockHeight = includeTimestamps ? LABEL_BLOCK_HEIGHT : 0;
-  const cardHeight = frameHeight + labelBlockHeight + CARD_PADDING * 2;
-  const canvasWidth =
-    sheetOptions.columns * frameWidth + (sheetOptions.columns + 1) * sheetOptions.gap;
-  const canvasHeight = rows * cardHeight + (rows + 1) * sheetOptions.gap;
+  const contentPadding = includeTimestamps ? CARD_PADDING : 0;
+  const cardHeight = frameHeight + labelBlockHeight + contentPadding * 2;
+  const horizontalGap = Math.max(sheetOptions.columns - 1, 0) * sheetOptions.gap;
+  const verticalGap = Math.max(rows - 1, 0) * sheetOptions.gap;
+  const canvasWidth = sheetOptions.columns * frameWidth + horizontalGap;
+  const canvasHeight = rows * cardHeight + verticalGap;
 
   return {
     rows,
@@ -80,6 +85,29 @@ function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
+async function resizeFrameWithPica(
+  source: HTMLCanvasElement,
+  targetWidth: number,
+  targetHeight: number,
+): Promise<HTMLCanvasElement> {
+  if (targetWidth === source.width && targetHeight === source.height) {
+    return source;
+  }
+
+  const target = document.createElement('canvas');
+  target.width = targetWidth;
+  target.height = targetHeight;
+
+  await pica.resize(source, target, {
+    alpha: true,
+    unsharpAmount: 80,
+    unsharpRadius: 0.6,
+    unsharpThreshold: 2,
+  });
+
+  return target;
+}
+
 export async function renderFrameSheet(
   frames: ExtractedFrame[],
   meta: VideoMeta,
@@ -108,13 +136,19 @@ export async function renderFrameSheet(
   context.textAlign = 'center';
   context.textBaseline = 'middle';
 
-  const cardHeight = metrics.frameHeight + metrics.labelBlockHeight + CARD_PADDING * 2;
+  const contentPadding = includeTimestamps ? CARD_PADDING : 0;
+  const cardHeight = metrics.frameHeight + metrics.labelBlockHeight + contentPadding * 2;
 
-  frames.forEach((frame, index) => {
+  for (const [index, frame] of frames.entries()) {
+    const scaledFrame = await resizeFrameWithPica(
+      frame.image,
+      metrics.frameWidth,
+      metrics.frameHeight,
+    );
     const column = index % sheetOptions.columns;
     const row = Math.floor(index / sheetOptions.columns);
-    const x = sheetOptions.gap + column * (metrics.frameWidth + sheetOptions.gap);
-    const y = sheetOptions.gap + row * (cardHeight + sheetOptions.gap);
+    const x = column * (metrics.frameWidth + sheetOptions.gap);
+    const y = row * (cardHeight + sheetOptions.gap);
 
     if (appearance.showCardBackground) {
       context.fillStyle = 'rgba(16, 24, 40, 0.08)';
@@ -129,9 +163,9 @@ export async function renderFrameSheet(
     }
 
     context.drawImage(
-      frame.image,
+      scaledFrame,
       x,
-      y + CARD_PADDING,
+      y + contentPadding,
       metrics.frameWidth,
       metrics.frameHeight,
     );
@@ -141,10 +175,10 @@ export async function renderFrameSheet(
       context.fillText(
         frame.label,
         x + metrics.frameWidth / 2,
-        y + CARD_PADDING + metrics.frameHeight + metrics.labelBlockHeight / 2,
+        y + contentPadding + metrics.frameHeight + metrics.labelBlockHeight / 2,
       );
     }
-  });
+  }
 
   const blob = await canvasToBlob(canvas);
 
