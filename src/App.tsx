@@ -9,6 +9,8 @@ import type {
   ProcessedFrame,
   RenderResult,
   SheetOptions,
+  SpineDraft,
+  SpineExportOptions,
   VideoMeta,
 } from './types';
 import {
@@ -22,6 +24,10 @@ import {
   getSheetFileName,
   getZipFileName,
 } from './lib/exportBundle';
+import {
+  buildSpineBundleZip,
+  getSpineZipFileName,
+} from './lib/spineBundle';
 import {
   getLayoutMetrics,
   getSheetAppearance,
@@ -97,6 +103,7 @@ type SheetPreviewResult = {
 };
 
 type ResultPreviewMode = 'sheet' | 'animation';
+type SpinePreviewMode = 'animation';
 
 type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
@@ -266,6 +273,22 @@ function toTransparentSheetFrames(processedFrames: ProcessedFrame[]): ExtractedF
   }));
 }
 
+function buildSpineDraftFromAssets(
+  assets: GeneratedAssets,
+  baseName: string,
+  width: number,
+  height: number,
+): SpineDraft {
+  const transparent = Boolean(assets.processed);
+  return {
+    frames: transparent ? toTransparentSheetFrames(assets.processed ?? []) : assets.frames,
+    baseName,
+    width,
+    height,
+    transparent,
+  };
+}
+
 function SupportLogo({ platform }: { platform: SupportPlatform }) {
   if (platform === 'bilibili') {
     return (
@@ -342,6 +365,17 @@ function App() {
   const [result, setResult] = useState<RenderResult | null>(null);
   const [resultTransparent, setResultTransparent] = useState(false);
   const [resultPreviewMode, setResultPreviewMode] = useState<ResultPreviewMode>('sheet');
+  const [spineDraft, setSpineDraft] = useState<SpineDraft | null>(null);
+  const [spineOptions, setSpineOptions] = useState<SpineExportOptions>({
+    skeletonName: 'video',
+    animationName: 'idle',
+    slotName: 'sprite',
+    fps: DEFAULT_FRAMES_PER_SECOND,
+  });
+  const [spineLoopPreview, setSpineLoopPreview] = useState(true);
+  const spinePreviewMode: SpinePreviewMode = 'animation';
+  const [spineAnimationPlaying, setSpineAnimationPlaying] = useState(true);
+  const [spineAnimationFrameIndex, setSpineAnimationFrameIndex] = useState(0);
   const [animationPlaying, setAnimationPlaying] = useState(true);
   const [animationFrameIndex, setAnimationFrameIndex] = useState(0);
   const [status, setStatus] = useState('请选择一个本地视频开始生成。');
@@ -359,17 +393,21 @@ function App() {
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resultAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const spineAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const controlsPanelRef = useRef<HTMLDivElement | null>(null);
   const cropPanelRef = useRef<HTMLElement | null>(null);
   const chromaPanelRef = useRef<HTMLElement | null>(null);
   const chromaActionsRef = useRef<HTMLDivElement | null>(null);
   const resultPanelRef = useRef<HTMLElement | null>(null);
+  const spinePanelRef = useRef<HTMLElement | null>(null);
   const readerRef = useRef<VideoFrameReader | null>(null);
   const readerTokenRef = useRef(0);
   const pendingChromaScrollRef = useRef(false);
   const pendingChromaScrollTopRef = useRef<number | null>(null);
   const pendingResultScrollRef = useRef(false);
   const pendingResultScrollTopRef = useRef<number | null>(null);
+  const pendingSpineScrollRef = useRef(false);
+  const pendingSpineScrollTopRef = useRef<number | null>(null);
   const hasInitializedInvalidationRef = useRef(false);
   const latestVideoUrlRef = useRef<string | null>(null);
   const latestResultRef = useRef<RenderResult | null>(null);
@@ -538,6 +576,7 @@ function App() {
   );
   const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
   const showResultStage = Boolean(result);
+  const showSpineStage = Boolean(spineDraft);
   const animationFrames = useMemo<ExtractedFrame[]>(() => {
     if (processedFrames) {
       return toTransparentSheetFrames(processedFrames);
@@ -545,6 +584,7 @@ function App() {
 
     return extractedFrames ?? [];
   }, [extractedFrames, processedFrames]);
+  const spineFrames = useMemo<ExtractedFrame[]>(() => spineDraft?.frames ?? [], [spineDraft]);
 
   function scrollToStep(target: { current: HTMLElement | null }): void {
     window.setTimeout(() => {
@@ -572,12 +612,20 @@ function App() {
   }
 
   function clearGeneratedAssets(nextStatus?: string): void {
+    pendingResultScrollRef.current = false;
+    pendingResultScrollTopRef.current = null;
+    pendingSpineScrollRef.current = false;
+    pendingSpineScrollTopRef.current = null;
     setExtractedFrames(null);
     setProcessedFrames(null);
     replacePreviewResult(null);
     setResultPreviewMode('sheet');
     setAnimationFrameIndex(0);
     setAnimationPlaying(true);
+    setSpineDraft(null);
+    setSpineAnimationFrameIndex(0);
+    setSpineAnimationPlaying(true);
+    setSpineLoopPreview(true);
     if (nextStatus) {
       setStatus(nextStatus);
     }
@@ -634,6 +682,21 @@ function App() {
       left: window.scrollX,
     });
   }, [showResultStage]);
+
+  useLayoutEffect(() => {
+    if (
+      !pendingSpineScrollRef.current ||
+      !showSpineStage ||
+      pendingSpineScrollTopRef.current === null
+    ) {
+      return;
+    }
+
+    window.scrollTo({
+      top: pendingSpineScrollTopRef.current,
+      left: window.scrollX,
+    });
+  }, [showSpineStage]);
 
   useEffect(() => {
     if (!videoUrl || !videoMeta) {
@@ -905,6 +968,57 @@ function App() {
   }, [result, resultPreviewMode, showResultStage]);
 
   useEffect(() => {
+    if (!spineFrames.length) {
+      setSpineAnimationFrameIndex(0);
+      return;
+    }
+
+    setSpineAnimationFrameIndex((current) => Math.min(current, spineFrames.length - 1));
+  }, [spineFrames.length]);
+
+  useEffect(() => {
+    const frame = spineFrames[spineAnimationFrameIndex];
+    if (!frame) {
+      return;
+    }
+
+    drawCanvas(spineAnimationCanvasRef.current, frame.image);
+  }, [spineAnimationFrameIndex, spineFrames]);
+
+  useEffect(() => {
+    if (
+      !pendingSpineScrollRef.current ||
+      !showSpineStage ||
+      !spineDraft ||
+      spinePreviewMode !== 'animation' ||
+      !spineFrames.length
+    ) {
+      return;
+    }
+
+    const canvas = spineAnimationCanvasRef.current;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) {
+      return;
+    }
+
+    let nextFrameId = 0;
+    let finalFrameId = 0;
+
+    nextFrameId = window.requestAnimationFrame(() => {
+      finalFrameId = window.requestAnimationFrame(() => {
+        pendingSpineScrollRef.current = false;
+        pendingSpineScrollTopRef.current = null;
+        scrollToStep(spinePanelRef);
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(nextFrameId);
+      window.cancelAnimationFrame(finalFrameId);
+    };
+  }, [showSpineStage, spineDraft, spineFrames, spinePreviewMode]);
+
+  useEffect(() => {
     if (!animationFrames.length) {
       setAnimationFrameIndex(0);
       return;
@@ -940,6 +1054,37 @@ function App() {
       window.clearInterval(interval);
     };
   }, [animationFrames.length, animationPlaying, framesPerSecond, resultPreviewMode]);
+
+  useEffect(() => {
+    if (
+      !spineAnimationPlaying ||
+      spinePreviewMode !== 'animation' ||
+      spineFrames.length <= 1
+    ) {
+      return;
+    }
+
+    const playbackFps = Math.min(Math.max(spineOptions.fps, 1), 60);
+    const interval = window.setInterval(() => {
+      setSpineAnimationFrameIndex((current) => {
+        if (spineLoopPreview) {
+          return (current + 1) % spineFrames.length;
+        }
+
+        if (current >= spineFrames.length - 1) {
+          window.clearInterval(interval);
+          setSpineAnimationPlaying(false);
+          return current;
+        }
+
+        return current + 1;
+      });
+    }, Math.round(1000 / playbackFps));
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [spineAnimationPlaying, spineFrames.length, spineLoopPreview, spineOptions.fps, spinePreviewMode]);
 
   useEffect(() => {
     if (!hasInitializedInvalidationRef.current) {
@@ -1179,6 +1324,62 @@ function App() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '打包 ZIP 失败。');
       setStatus('ZIP 导出失败，请稍后再试。');
+    } finally {
+      setIsRendering(false);
+    }
+  }
+
+  async function handleOpenSpineWorkspace(): Promise<void> {
+    try {
+      if (!outputVideoMeta) {
+        throw new Error('请先上传视频并生成可用帧数据。');
+      }
+
+      setError(null);
+      const assets = await ensureAssets();
+      const nextDraft = buildSpineDraftFromAssets(
+        assets,
+        baseFileName,
+        outputVideoMeta.width,
+        outputVideoMeta.height,
+      );
+
+      pendingSpineScrollTopRef.current = window.scrollY;
+      pendingSpineScrollRef.current = true;
+      setSpineDraft(nextDraft);
+      setSpineOptions({
+        skeletonName: baseFileName,
+        animationName: 'idle',
+        slotName: 'sprite',
+        fps: framesPerSecond,
+      });
+      setSpineLoopPreview(true);
+      setSpineAnimationFrameIndex(0);
+      setSpineAnimationPlaying(true);
+      setStatus('Spine 动画工作区已准备好，可以继续预览或下载 Spine ZIP。');
+    } catch (nextError) {
+      pendingSpineScrollRef.current = false;
+      pendingSpineScrollTopRef.current = null;
+      setError(nextError instanceof Error ? nextError.message : '打开 Spine 工作区失败。');
+      setStatus('Spine 工作区打开失败，请稍后重试。');
+    }
+  }
+
+  async function handleDownloadSpineZip(): Promise<void> {
+    try {
+      if (!spineDraft) {
+        throw new Error('请先进入 Spine 动画工作区。');
+      }
+
+      setError(null);
+      setIsRendering(true);
+      setStatus('正在打包 Spine JSON + PNG ZIP...');
+      const blob = await buildSpineBundleZip(spineDraft, spineOptions);
+      triggerBlobDownload(blob, getSpineZipFileName(spineDraft.baseName));
+      setStatus('Spine ZIP 已生成并开始下载。');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Spine 导出失败。');
+      setStatus('Spine ZIP 导出失败，请稍后再试。');
     } finally {
       setIsRendering(false);
     }
@@ -2009,6 +2210,15 @@ function App() {
 
             <div className="export-actions">
               <button
+                className="secondary-button secondary-button--slate"
+                disabled={isRendering}
+                type="button"
+                onClick={() => void handleOpenSpineWorkspace()}
+              >
+                进入 Spine 动画
+              </button>
+
+              <button
                 className="secondary-button"
                 disabled={isRendering}
                 type="button"
@@ -2037,6 +2247,161 @@ function App() {
             </div>
           </div>
         </section>
+        ) : null}
+
+        {showSpineStage && spineDraft ? (
+          <section ref={spinePanelRef} className="result-grid spine-grid">
+            <div className="panel preview-panel">
+              <div className="panel-head">
+                <h2>6. Spine 动画工作区</h2>
+                <span>
+                  {spineDraft.transparent ? '透明帧优先' : '普通帧'} · {spineDraft.width} × {spineDraft.height}
+                </span>
+              </div>
+
+              <div className="spine-preview-note option-card option-card--metric">
+                <span>当前资源</span>
+                <strong>{spineDraft.frames.length} 帧</strong>
+                <small>{spineDraft.baseName} · {spineOptions.fps} FPS</small>
+              </div>
+
+              <div
+                className={`preview-wrap preview-wrap--animation ${
+                  spineDraft.transparent ? 'preview-wrap--transparent' : 'preview-wrap--solid'
+                }`}
+              >
+                <canvas
+                  ref={spineAnimationCanvasRef}
+                  aria-label="Spine 序列动画预览"
+                  className="preview-canvas"
+                />
+              </div>
+
+              <div className="animation-toolbar">
+                <div className="animation-meta">
+                  <strong>
+                    第 {Math.min(spineAnimationFrameIndex + 1, spineFrames.length)} / {spineFrames.length} 帧
+                  </strong>
+                  <span>
+                    {spineFrames[spineAnimationFrameIndex]
+                      ? `${spineFrames[spineAnimationFrameIndex].label} · ${spineOptions.fps} FPS 预览`
+                      : '等待 Spine 预览帧'}
+                  </span>
+                </div>
+
+                <div className="animation-actions">
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => setSpineAnimationPlaying((current) => !current)}
+                  >
+                    {spineAnimationPlaying ? '暂停' : '播放'}
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => {
+                      setSpineAnimationFrameIndex(0);
+                      setSpineAnimationPlaying(true);
+                    }}
+                  >
+                    重播
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="panel download-panel">
+              <div className="panel-head">
+                <h2>Spine 导出参数</h2>
+                <span>JSON + PNG ZIP</span>
+              </div>
+
+              <p className="download-copy">
+                导出会生成 `skeleton.json`、`images/*.png` 和 `README.txt`，适合继续导入 Spine 作为单槽位逐帧动画。
+              </p>
+
+              <div className="export-config-grid">
+                <label className="field">
+                  <span>骨骼名</span>
+                  <input
+                    type="text"
+                    value={spineOptions.skeletonName}
+                    onChange={(event) =>
+                      setSpineOptions((current) => ({
+                        ...current,
+                        skeletonName: event.target.value || baseFileName,
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="field">
+                  <span>动画名</span>
+                  <input
+                    type="text"
+                    value={spineOptions.animationName}
+                    onChange={(event) =>
+                      setSpineOptions((current) => ({
+                        ...current,
+                        animationName: event.target.value || 'idle',
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="field">
+                  <span>插槽名</span>
+                  <input
+                    type="text"
+                    value={spineOptions.slotName}
+                    onChange={(event) =>
+                      setSpineOptions((current) => ({
+                        ...current,
+                        slotName: event.target.value || 'sprite',
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="field">
+                  <span>导出 FPS</span>
+                  <input
+                    min={1}
+                    max={60}
+                    type="number"
+                    value={spineOptions.fps}
+                    onChange={(event) =>
+                      setSpineOptions((current) => ({
+                        ...current,
+                        fps: Math.min(Math.max(Number(event.target.value) || 1, 1), 60),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="toggle-card export-config-grid__full">
+                  <input
+                    checked={spineLoopPreview}
+                    type="checkbox"
+                    onChange={(event) => setSpineLoopPreview(event.target.checked)}
+                  />
+                  <span>循环预览</span>
+                </label>
+              </div>
+
+              <div className="export-actions">
+                <button
+                  className="secondary-button secondary-button--emerald"
+                  disabled={isRendering}
+                  type="button"
+                  onClick={() => void handleDownloadSpineZip()}
+                >
+                  下载 Spine ZIP
+                </button>
+              </div>
+            </div>
+          </section>
         ) : null}
 
         <footer className="app-footer">

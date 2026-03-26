@@ -7,7 +7,7 @@ export type VideoMeta = {
 
 export type BackgroundMode = 'none' | 'color-key';
 
-export type ExportMode = 'sheet' | 'transparent-sheet' | 'transparent-frames-zip';
+export type ExportMode = 'sheet' | 'transparent-sheet' | 'transparent-frames-zip' | 'spine-zip';
 
 export type PreviewMode = 'result' | 'mask' | 'solid';
 
@@ -54,6 +54,13 @@ export type RenderResult = {
   outputHeight: number;
 };
 
+export type SpineExportOptions = {
+  skeletonName: string;
+  animationName: string;
+  slotName: string;
+  fps: number;
+};
+
 export type ExtractedFrame = {
   image: HTMLCanvasElement;
   time: number;
@@ -82,6 +89,14 @@ export type ColorKeyOptions = {
 export type ProcessedFrame = ExtractedFrame & {
   processedImage: HTMLCanvasElement;
   maskImage: HTMLCanvasElement;
+};
+
+export type SpineDraft = {
+  frames: ExtractedFrame[];
+  baseName: string;
+  width: number;
+  height: number;
+  transparent: boolean;
 };
 
 export type LayoutMetrics = {
