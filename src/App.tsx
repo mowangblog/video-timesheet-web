@@ -115,6 +115,12 @@ type DragSelection = {
   current: SamplePoint;
 };
 
+type SheetPreviewConfig = {
+  columns: number;
+  gap: number;
+  frameSize: number | null;
+};
+
 function clampPercent(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -275,6 +281,10 @@ function toTransparentSheetFrames(processedFrames: ProcessedFrame[]): ExtractedF
   }));
 }
 
+function getSheetPreviewConfigKey(config: SheetPreviewConfig): string {
+  return `${config.columns}|${config.gap}|${config.frameSize ?? 'original'}`;
+}
+
 function buildSpineDraftFromAssets(
   assets: GeneratedAssets,
   baseName: string,
@@ -403,6 +413,9 @@ function App() {
   const resultPanelRef = useRef<HTMLElement | null>(null);
   const spinePanelRef = useRef<HTMLElement | null>(null);
   const readerRef = useRef<VideoFrameReader | null>(null);
+  const autoPreviewTimerRef = useRef<number | null>(null);
+  const autoPreviewInFlightRef = useRef(false);
+  const lastSheetPreviewConfigRef = useRef<string | null>(null);
   const readerTokenRef = useRef(0);
   const pendingChromaScrollRef = useRef(false);
   const pendingChromaScrollTopRef = useRef<number | null>(null);
@@ -543,6 +556,15 @@ function App() {
         : null,
     [exportLayoutMetrics],
   );
+  const sheetPreviewConfigKey = useMemo(
+    () =>
+      getSheetPreviewConfigKey({
+        columns: sheetOptions.columns,
+        gap: sheetOptions.gap,
+        frameSize: sheetOptions.frameSize ?? null,
+      }),
+    [sheetOptions.columns, sheetOptions.frameSize, sheetOptions.gap],
+  );
 
   const colorKeyOptions = useMemo<ColorKeyOptions | null>(() => {
     if (!colorSample) {
@@ -628,6 +650,12 @@ function App() {
     setSpineAnimationFrameIndex(0);
     setSpineAnimationPlaying(true);
     setSpineLoopPreview(true);
+    lastSheetPreviewConfigRef.current = null;
+    autoPreviewInFlightRef.current = false;
+    if (autoPreviewTimerRef.current !== null) {
+      window.clearTimeout(autoPreviewTimerRef.current);
+      autoPreviewTimerRef.current = null;
+    }
     if (nextStatus) {
       setStatus(nextStatus);
     }
@@ -644,6 +672,9 @@ function App() {
   useEffect(() => {
     return () => {
       disposeReferenceReader();
+      if (autoPreviewTimerRef.current !== null) {
+        window.clearTimeout(autoPreviewTimerRef.current);
+      }
 
       if (latestVideoUrlRef.current) {
         revokeVideoAsset(latestVideoUrlRef.current);
@@ -1089,6 +1120,42 @@ function App() {
   }, [spineAnimationPlaying, spineFrames.length, spineLoopPreview, spineOptions.fps, spinePreviewMode]);
 
   useEffect(() => {
+    if (!showResultStage || autoPreviewInFlightRef.current) {
+      return;
+    }
+
+    if (lastSheetPreviewConfigRef.current === null || lastSheetPreviewConfigRef.current === sheetPreviewConfigKey) {
+      return;
+    }
+
+    if (autoPreviewTimerRef.current !== null) {
+      window.clearTimeout(autoPreviewTimerRef.current);
+    }
+
+    autoPreviewTimerRef.current = window.setTimeout(() => {
+      autoPreviewTimerRef.current = null;
+      autoPreviewInFlightRef.current = true;
+      setError(null);
+      setStatus('参数已更新，正在自动刷新序列图...');
+      void renderSheetPreview()
+        .catch((nextError) => {
+          setError(nextError instanceof Error ? nextError.message : '自动预览失败。');
+          setStatus('自动预览失败，请稍后重试。');
+        })
+        .finally(() => {
+          autoPreviewInFlightRef.current = false;
+        });
+    }, 220);
+
+    return () => {
+      if (autoPreviewTimerRef.current !== null) {
+        window.clearTimeout(autoPreviewTimerRef.current);
+        autoPreviewTimerRef.current = null;
+      }
+    };
+  }, [sheetPreviewConfigKey, showResultStage]);
+
+  useEffect(() => {
     if (!hasInitializedInvalidationRef.current) {
       hasInitializedInvalidationRef.current = true;
       return;
@@ -1262,6 +1329,7 @@ function App() {
     );
 
     replacePreviewResult(renderResult, transparent);
+    lastSheetPreviewConfigRef.current = sheetPreviewConfigKey;
     setStatus(transparent ? '透明序列图已生成，可以继续预览或下载。' : '普通序列图已生成，可以继续预览或下载。');
 
     return {
@@ -1281,19 +1349,6 @@ function App() {
       pendingResultScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       setStatus('生成失败，请调整参数后重试。');
-    }
-  }
-
-  async function handleRefreshPreview(): Promise<void> {
-    try {
-      pendingResultScrollTopRef.current = window.scrollY;
-      pendingResultScrollRef.current = true;
-      await renderSheetPreview();
-    } catch (nextError) {
-      pendingResultScrollRef.current = false;
-      pendingResultScrollTopRef.current = null;
-      setError(nextError instanceof Error ? nextError.message : '预览失败。');
-      setStatus('预览失败，请稍后再试。');
     }
   }
 
@@ -2196,7 +2251,7 @@ function App() {
             </div>
 
             <p className="download-copy">
-              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；精灵图导出默认保持 0 间距，最终会对每一帧做高质量智能缩放。
+              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；修改导出参数后会自动刷新当前序列图预览。
             </p>
 
             <div className="export-config-grid">
@@ -2257,15 +2312,6 @@ function App() {
                 onClick={() => void handleOpenSpineWorkspace()}
               >
                 进入 Spine 动画
-              </button>
-
-              <button
-                className="secondary-button"
-                disabled={isRendering}
-                type="button"
-                onClick={() => void handleRefreshPreview()}
-              >
-                预览当前序列图
               </button>
 
               <button

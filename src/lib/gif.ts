@@ -370,55 +370,39 @@ function encodeLzwIndices(indexedPixels: Uint8Array, minCodeSize: number): Uint8
   const bitWriter = new BitWriter();
   const clearCode = 1 << minCodeSize;
   const endCode = clearCode + 1;
-  let nextCode = endCode + 1;
   let codeSize = minCodeSize + 1;
-  const dictionary = new Map<number, number>();
+  let dictionarySize = endCode + 1;
+  let hasPreviousLiteral = false;
 
   const resetDictionary = (): void => {
-    dictionary.clear();
-    nextCode = endCode + 1;
     codeSize = minCodeSize + 1;
+    dictionarySize = endCode + 1;
+    hasPreviousLiteral = false;
   };
 
   bitWriter.write(clearCode, codeSize);
+  resetDictionary();
 
-  if (indexedPixels.length === 0) {
-    bitWriter.write(endCode, codeSize);
-    return bitWriter.finish();
-  }
-
-  let prefix = indexedPixels[0] ?? 0;
-
-  for (let index = 1; index < indexedPixels.length; index += 1) {
-    const suffix = indexedPixels[index] ?? 0;
-    const key = (prefix << 8) | suffix;
-    const existing = dictionary.get(key);
-
-    if (existing !== undefined) {
-      prefix = existing;
-      continue;
-    }
-
-    bitWriter.write(prefix, codeSize);
-
-    if (nextCode <= MAX_LZW_CODE) {
-      dictionary.set(key, nextCode);
-      nextCode += 1;
-
-      if (nextCode === 1 << codeSize && codeSize < MAX_GIF_CODE_SIZE) {
-        codeSize += 1;
-      }
-    } else {
+  for (const literalCode of indexedPixels) {
+    if (hasPreviousLiteral && dictionarySize > MAX_LZW_CODE) {
       bitWriter.write(clearCode, codeSize);
       resetDictionary();
     }
 
-    prefix = suffix;
+    bitWriter.write(literalCode, codeSize);
+
+    if (hasPreviousLiteral) {
+      dictionarySize += 1;
+
+      if (dictionarySize === 1 << codeSize && codeSize < MAX_GIF_CODE_SIZE) {
+        codeSize += 1;
+      }
+    }
+
+    hasPreviousLiteral = true;
   }
 
-  bitWriter.write(prefix, codeSize);
   bitWriter.write(endCode, codeSize);
-
   return bitWriter.finish();
 }
 
@@ -592,5 +576,6 @@ export async function buildAnimatedGif(
   writer.writeByte(GIF_TRAILER);
 
   const bytes = writer.toUint8Array().slice();
-  return new Blob([bytes], { type: 'image/gif' });
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return new Blob([buffer], { type: 'image/gif' });
 }
