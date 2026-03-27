@@ -7,7 +7,13 @@ export type VideoMeta = {
 
 export type BackgroundMode = 'none' | 'color-key';
 
-export type ExportMode = 'sheet' | 'transparent-sheet' | 'transparent-frames-zip' | 'spine-zip';
+export type ExportMode =
+  | 'sheet'
+  | 'transparent-sheet'
+  | 'gif'
+  | 'transparent-gif'
+  | 'transparent-frames-zip'
+  | 'spine-zip';
 
 export type PreviewMode = 'result' | 'mask' | 'solid';
 

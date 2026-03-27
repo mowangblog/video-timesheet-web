@@ -21,9 +21,11 @@ import {
 import {
   buildTransparentFramesZip,
   getBaseFileName,
+  getGifFileName,
   getSheetFileName,
   getZipFileName,
 } from './lib/exportBundle';
+import { buildAnimatedGif } from './lib/gif';
 import {
   buildSpineBundleZip,
   getSpineZipFileName,
@@ -1329,6 +1331,45 @@ function App() {
     }
   }
 
+  async function handleDownloadGif(): Promise<void> {
+    try {
+      const assets = await ensureAssets();
+      const transparent = Boolean(assets.processed);
+      const framesForGif = transparent
+        ? toTransparentSheetFrames(assets.processed ?? [])
+        : assets.frames;
+
+      if (!framesForGif.length) {
+        throw new Error('没有可导出的序列帧，请先生成预览。');
+      }
+
+      setError(null);
+      setIsRendering(true);
+      setStatus('正在分析 GIF 调色板...');
+
+      const blob = await buildAnimatedGif(framesForGif, {
+        fps: framesPerSecond,
+        transparent,
+        onProgress: (progress) => {
+          if (progress.phase === 'palette') {
+            setStatus(`正在分析 GIF 调色板 ${progress.current}/${progress.total}...`);
+            return;
+          }
+
+          setStatus(`正在编码 GIF ${progress.current}/${progress.total}...`);
+        },
+      });
+
+      triggerBlobDownload(blob, getGifFileName(baseFileName, transparent));
+      setStatus('GIF 已生成并开始下载。');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'GIF 导出失败。');
+      setStatus('GIF 导出失败，请稍后再试。');
+    } finally {
+      setIsRendering(false);
+    }
+  }
+
   async function handleOpenSpineWorkspace(): Promise<void> {
     try {
       if (!outputVideoMeta) {
@@ -2155,7 +2196,7 @@ function App() {
             </div>
 
             <p className="download-copy">
-              导出前可以改列数和单帧尺寸预设；精灵图导出默认保持 0 间距，最终会对每一帧做高质量智能缩放。
+              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；精灵图导出默认保持 0 间距，最终会对每一帧做高质量智能缩放。
             </p>
 
             <div className="export-config-grid">
@@ -2234,6 +2275,15 @@ function App() {
                 onClick={() => void handleDownloadSheet()}
               >
                 {resultTransparent ? '下载透明序列图 PNG' : '下载普通序列图 PNG'}
+              </button>
+
+              <button
+                className="secondary-button"
+                disabled={isRendering}
+                type="button"
+                onClick={() => void handleDownloadGif()}
+              >
+                下载动画 GIF
               </button>
 
               <button

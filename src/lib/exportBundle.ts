@@ -49,6 +49,11 @@ export function getZipFileName(baseName: string): string {
   return `${sanitizeBaseName(baseName)}-frames.zip`;
 }
 
+export function getGifFileName(baseName: string, transparent: boolean): string {
+  const safeBase = sanitizeBaseName(baseName);
+  return `${safeBase}${transparent ? '-transparent' : ''}-animation.gif`;
+}
+
 export async function buildTransparentFramesZip(
   frames: ProcessedFrame[],
   baseName: string,

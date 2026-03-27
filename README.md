@@ -1,7 +1,7 @@
 # video-timesheet-web
 
 一个纯前端工具站，用来把本地视频转换成序列帧资源。  
-当前版本支持浏览器内裁剪、按片段提帧、点选背景色抠图、导出精灵图、透明单帧 ZIP，以及进一步生成 Spine 动画资源包。
+当前版本支持浏览器内裁剪、按片段提帧、点选背景色抠图、导出精灵图、动画 GIF、透明单帧 ZIP，以及进一步生成 Spine 动画资源包。
 
 在线地址：
 [https://mowangblog.github.io/video-timesheet-web/](https://mowangblog.github.io/video-timesheet-web/)
@@ -15,6 +15,7 @@
 - 点选背景颜色做 ChromaKey 抠图
 - 预览普通序列图、透明序列图和动画播放效果
 - 导出精灵图 PNG
+- 导出动画 GIF
 - 导出透明单帧 ZIP
 - 导出 Spine `JSON + PNG ZIP`
 
@@ -45,13 +46,19 @@
 - 使用 `Pica` 对单帧进行高质量缩放
 - 默认适合做 sprite sheet / timesheet
 
-### 2. 透明单帧 ZIP
+### 2. 动画 GIF
+
+- 自动从当前帧序列生成 GIF
+- 未抠图时导出普通 GIF；已抠图时导出透明 GIF（单通道透明）
+- 帧间隔会根据提帧时间自动计算
+
+### 3. 透明单帧 ZIP
 
 - 仅在完成背景扣像后可用
 - ZIP 中每一帧都是单独 PNG
 - 文件名会带序号
 
-### 3. Spine ZIP
+### 4. Spine ZIP
 
 导出内容固定为：
 
